@@ -106,6 +106,25 @@ constexpr CGFloat kWindowHeight = 600;
 
 @end
 
+namespace {
+
+void InstallMainMenu() {
+    NSMenu *menuBar = [[NSMenu alloc] init];
+    NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
+    [menuBar addItem:appMenuItem];
+    [NSApp setMainMenu:menuBar];
+
+    NSMenu *appMenu = [[NSMenu alloc] init];
+    NSString *quitTitle = [@"Quit " stringByAppendingString:[[NSProcessInfo processInfo] processName]];
+    NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:quitTitle
+                                                       action:@selector(terminate:)
+                                                keyEquivalent:@"q"];
+    [appMenu addItem:quitItem];
+    [appMenuItem setSubmenu:appMenu];
+}
+
+} // namespace
+
 int main(int argc, const char *argv[]) {
     (void)argc;
     (void)argv;
@@ -113,6 +132,7 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        InstallMainMenu();
         AppDelegate *delegate = [[AppDelegate alloc] init];
         [NSApp setDelegate:delegate];
         [NSApp run];
