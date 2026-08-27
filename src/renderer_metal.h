@@ -17,16 +17,17 @@ struct RenderTarget {
 
 struct RendererState;
 
-// Raw, per-frame accumulated trackpad deltas. Plain floats so platform_macos.mm
+// Raw, per-frame accumulated pointer deltas. Plain floats so platform_macos.mm
 // (which reads the NSEvents) and app.mm (which just forwards this struct) don't
 // need to know anything about how the renderer interprets them.
 struct CameraInput {
-    float panX;       // two-finger drag, points
-    float panY;       // two-finger drag, points
-    float zoomDelta;  // pinch magnification
-    float orbitYaw;   // shift + two-finger drag, points
-    float orbitPitch; // shift + two-finger drag, points
+    float panX;       // two-finger drag or right-drag, points
+    float panY;       // two-finger drag or right-drag, points
+    float zoomDelta;  // pinch magnification or mouse wheel
+    float orbitYaw;   // shift + two-finger drag, shift-right-drag, or middle-drag, points
+    float orbitPitch; // shift + two-finger drag, shift-right-drag, or middle-drag, points
     bool cycleDebugView; // one keypress: advance the AO debug view mode
+    bool toggleFxaa;     // one keypress: enable/disable the FXAA post pass
 };
 
 RendererState *RendererInit(Arena *arena, id<MTLDevice> device,

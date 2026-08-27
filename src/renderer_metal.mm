@@ -262,6 +262,52 @@ fragment float4 lighting_fragment(FullscreenOut in [[stage_in]],
     float3 color = baseColor * (0.35 * ambientOcclusion + 0.65 * diffuse);
     return float4(color, 1.0);
 }
+
+constant float kFxaaSpanMax = 8.0;
+constant float kFxaaReduceMul = 1.0 / 8.0;
+constant float kFxaaReduceMin = 1.0 / 128.0;
+constant float3 kLumaWeights = float3(0.299, 0.587, 0.114);
+
+fragment float4 fxaa_fragment(FullscreenOut in [[stage_in]],
+                              texture2d<float> litTexture [[texture(0)]],
+                              constant float2 &inverseScreenSize [[buffer(0)]]) {
+    constexpr sampler linearSampler(address::clamp_to_edge, filter::linear);
+    float2 uv = in.uv;
+
+    float lumaNW = dot(litTexture.sample(linearSampler, uv + float2(-1.0, -1.0) * inverseScreenSize).rgb, kLumaWeights);
+    float lumaNE = dot(litTexture.sample(linearSampler, uv + float2( 1.0, -1.0) * inverseScreenSize).rgb, kLumaWeights);
+    float lumaSW = dot(litTexture.sample(linearSampler, uv + float2(-1.0,  1.0) * inverseScreenSize).rgb, kLumaWeights);
+    float lumaSE = dot(litTexture.sample(linearSampler, uv + float2( 1.0,  1.0) * inverseScreenSize).rgb, kLumaWeights);
+    float3 rgbM = litTexture.sample(linearSampler, uv).rgb;
+    float lumaM = dot(rgbM, kLumaWeights);
+
+    float lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
+    float lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
+    if (lumaMax - lumaMin < lumaMax * 0.125) {
+        return float4(rgbM, 1.0);
+    }
+
+    float2 direction = float2(
+        -((lumaNW + lumaNE) - (lumaSW + lumaSE)),
+         ((lumaNW + lumaSW) - (lumaNE + lumaSE)));
+    float directionReduce = max((lumaNW + lumaNE + lumaSW + lumaSE) * (0.25 * kFxaaReduceMul), kFxaaReduceMin);
+    float inverseDirectionMin = 1.0 / (min(abs(direction.x), abs(direction.y)) + directionReduce);
+    direction = clamp(direction * inverseDirectionMin,
+                      float2(-kFxaaSpanMax), float2(kFxaaSpanMax)) * inverseScreenSize;
+
+    float3 rgbInner = 0.5 * (
+        litTexture.sample(linearSampler, uv + direction * (1.0 / 3.0 - 0.5)).rgb +
+        litTexture.sample(linearSampler, uv + direction * (2.0 / 3.0 - 0.5)).rgb);
+    float3 rgbOuter = rgbInner * 0.5 + 0.25 * (
+        litTexture.sample(linearSampler, uv + direction * -0.5).rgb +
+        litTexture.sample(linearSampler, uv + direction *  0.5).rgb);
+
+    float lumaOuter = dot(rgbOuter, kLumaWeights);
+    if (lumaOuter < lumaMin || lumaOuter > lumaMax) {
+        return float4(rgbInner, 1.0);
+    }
+    return float4(rgbOuter, 1.0);
+}
 )";
 
 float Clamp(float value, float minValue, float maxValue) {
@@ -319,6 +365,7 @@ struct RendererState {
     id<MTLRenderPipelineState> aoPipeline;
     id<MTLRenderPipelineState> blurPipeline;
     id<MTLRenderPipelineState> lightingPipeline;
+    id<MTLRenderPipelineState> fxaaPipeline;
     id<MTLDepthStencilState> depthState;
 
     id<MTLBuffer> cubeVertexBuffer;
@@ -332,6 +379,7 @@ struct RendererState {
     id<MTLTexture> sceneDepthTexture;
     id<MTLTexture> aoRawTexture;
     id<MTLTexture> aoBlurTexture;
+    id<MTLTexture> litColorTexture;
     id<MTLTexture> noiseTexture;
     uint32_t screenWidth;
     uint32_t screenHeight;
@@ -346,6 +394,7 @@ struct RendererState {
     float cameraYaw;
     float cameraPitch;
     int debugMode;
+    bool fxaaEnabled;
 
     uint32_t cubeIndexCount;
     uint32_t planeIndexCount;
@@ -396,6 +445,15 @@ void AllocateScreenTargets(RendererState *state, uint32_t width, uint32_t height
     aoTarget.storageMode = MTLStorageModePrivate;
     state->aoRawTexture = [state->device newTextureWithDescriptor:aoTarget];
     state->aoBlurTexture = [state->device newTextureWithDescriptor:aoTarget];
+
+    MTLTextureDescriptor *litTarget =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:state->colorFormat
+                                                          width:width
+                                                         height:height
+                                                      mipmapped:NO];
+    litTarget.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    litTarget.storageMode = MTLStorageModePrivate;
+    state->litColorTexture = [state->device newTextureWithDescriptor:litTarget];
 }
 
 void BuildAoKernel(RendererState *state) {
@@ -507,6 +565,7 @@ RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
     state->aoPipeline = MakeFullscreenPipeline(device, library, @"ao_fragment", MTLPixelFormatR8Unorm);
     state->blurPipeline = MakeFullscreenPipeline(device, library, @"blur_fragment", MTLPixelFormatR8Unorm);
     state->lightingPipeline = MakeFullscreenPipeline(device, library, @"lighting_fragment", colorFormat);
+    state->fxaaPipeline = MakeFullscreenPipeline(device, library, @"fxaa_fragment", colorFormat);
 
     MTLDepthStencilDescriptor *depthDescriptor = [[MTLDepthStencilDescriptor alloc] init];
     depthDescriptor.depthCompareFunction = MTLCompareFunctionLess;
@@ -526,6 +585,7 @@ RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
     state->cameraYaw = atan2f(offset.x, offset.z);
     state->cameraPitch = asinf(offset.y / state->cameraDistance);
     state->debugMode = 0;
+    state->fxaaEnabled = true;
 
     RendererResize(state, drawableWidth, drawableHeight);
 
@@ -549,6 +609,9 @@ void RendererResize(RendererState *renderer, float drawableWidth, float drawable
 void RendererUpdateCamera(RendererState *renderer, CameraInput input) {
     if (input.cycleDebugView) {
         renderer->debugMode = (renderer->debugMode + 1) % 3;
+    }
+    if (input.toggleFxaa) {
+        renderer->fxaaEnabled = !renderer->fxaaEnabled;
     }
 
     renderer->cameraYaw -= input.orbitYaw * kOrbitSensitivity;
@@ -677,9 +740,10 @@ void EncodeBlurPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer)
     [encoder endEncoding];
 }
 
-void EncodeLightingPass(RendererState *renderer, RenderTarget target) {
+void EncodeLightingPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer,
+                        id<MTLTexture> destination) {
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = target.drawable.texture;
+    pass.colorAttachments[0].texture = destination;
     pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
 
@@ -695,12 +759,31 @@ void EncodeLightingPass(RendererState *renderer, RenderTarget target) {
     params.misc[3] = 0.0f;
 
     id<MTLRenderCommandEncoder> encoder =
-        [target.commandBuffer renderCommandEncoderWithDescriptor:pass];
+        [commandBuffer renderCommandEncoderWithDescriptor:pass];
     [encoder setRenderPipelineState:renderer->lightingPipeline];
     [encoder setFragmentTexture:renderer->gPositionTexture atIndex:0];
     [encoder setFragmentTexture:renderer->gNormalTexture atIndex:1];
     [encoder setFragmentTexture:renderer->aoBlurTexture atIndex:2];
     [encoder setFragmentBytes:&params length:sizeof(params) atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+}
+
+void EncodeFxaaPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer,
+                    id<MTLTexture> destination) {
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = destination;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    float inverseScreenSize[2] = {1.0f / (float)renderer->screenWidth,
+                                  1.0f / (float)renderer->screenHeight};
+
+    id<MTLRenderCommandEncoder> encoder =
+        [commandBuffer renderCommandEncoderWithDescriptor:pass];
+    [encoder setRenderPipelineState:renderer->fxaaPipeline];
+    [encoder setFragmentTexture:renderer->litColorTexture atIndex:0];
+    [encoder setFragmentBytes:inverseScreenSize length:sizeof(inverseScreenSize) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
 }
@@ -711,7 +794,13 @@ void RendererRender(RendererState *renderer, const GameState *game, RenderTarget
     EncodeGeometryPass(renderer, game, target.commandBuffer);
     EncodeAoPass(renderer, target.commandBuffer);
     EncodeBlurPass(renderer, target.commandBuffer);
-    EncodeLightingPass(renderer, target);
+
+    if (renderer->fxaaEnabled) {
+        EncodeLightingPass(renderer, target.commandBuffer, renderer->litColorTexture);
+        EncodeFxaaPass(renderer, target.commandBuffer, target.drawable.texture);
+    } else {
+        EncodeLightingPass(renderer, target.commandBuffer, target.drawable.texture);
+    }
 
     [target.commandBuffer presentDrawable:target.drawable];
     [target.commandBuffer commit];

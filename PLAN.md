@@ -253,3 +253,31 @@ invariant is unaffected: these are Metal allocations, not `ArenaPush`.
   (same simplification the original forward shader made).
 - No half-resolution AO or temporal accumulation; the blur is the only
   denoise.
+
+## Feature: FXAA
+
+### Problem
+Cube/plane edges alias badly — the renderer has no multisampling and the
+deferred pipeline rules out MSAA on the lighting output anyway. Add FXAA, a
+single full-screen post pass that finds luma edges in the final image and
+blends across them.
+
+### Change
+- The lighting pass stops writing the drawable directly. It writes a new
+  screen-sized `litColorTexture` (drawable's `colorFormat`, one more entry
+  in `AllocateScreenTargets`). A new `fxaa_fragment` full-screen pass reads
+  that texture and writes the drawable.
+- `fxaa_fragment` is the classic compact FXAA (luma from RGB dot 0.299/
+  0.587/0.114, 3x3 luma corners -> edge direction, up to 4 taps along it).
+  Its only uniform is `1 / screenSize`.
+- Toggle: the `f` key flips `RendererState.fxaaEnabled`
+  (`CameraInput.toggleFxaa`, read in `platform_macos.mm` next to the `o`
+  key). When off, the lighting pass targets the drawable again and the FXAA
+  pass is skipped — `EncodeLightingPass` takes the destination texture as a
+  parameter so both wirings share one code path.
+
+### Known limitations
+- Compact FXAA only (no FXAA 3.11 quality presets, no subpixel-aliasing
+  tuning knobs). Good enough for hard-surface cube edges.
+- Runs on the LDR lit image with no separate luma/alpha channel, so very
+  dark or very bright edges antialias slightly less well.

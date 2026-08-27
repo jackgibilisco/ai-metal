@@ -25,7 +25,8 @@ is enough to build.
 There is no test suite; verification is running the binary and confirming 3
 distinct, independently-rotating cubes render without a crash or Metal
 validation error in the console output. The `o` key cycles the ambient-
-occlusion debug view (normal / raw AO buffer / AO disabled).
+occlusion debug view (normal / raw AO buffer / AO disabled); the `f` key
+toggles the FXAA post pass.
 
 ## Architecture
 
@@ -63,23 +64,25 @@ Three layers, each with a different portability contract:
   simulation/gameplay rather than rendering.
 - **`src/renderer_metal.h`/`.mm`** — Metal-specific but OS-agnostic: it never
   touches AppKit/UIKit, only the Metal API. Owns `RendererState` (device, the
-  four pipelines, depth state, vertex/index/uniform buffers, the screen-sized
-  SSAO targets, the AO sample kernel + noise texture, orbit-camera state, the
-  AO debug mode), cube/plane mesh data, the embedded shader source,
-  `RendererResize` (rebuilds the projection and the screen targets for a new
-  drawable size), `RendererUpdateCamera` (applies a frame's `CameraInput` —
-  trackpad pan/pinch-zoom/shift-orbit deltas, plus the `o`-key debug-view
-  cycle — to the camera), and `RendererRender`, which encodes one frame from
+  five pipelines, depth state, vertex/index/uniform buffers, the screen-sized
+  SSAO targets + lit-color target, the AO sample kernel + noise texture,
+  orbit-camera state, the AO debug mode, the FXAA on/off flag), cube/plane
+  mesh data, the embedded shader source, `RendererResize` (rebuilds the
+  projection and the screen targets for a new drawable size),
+  `RendererUpdateCamera` (applies a frame's `CameraInput` — trackpad/mouse
+  pan/zoom/orbit deltas, plus the `o`-key debug-view cycle and `f`-key FXAA
+  toggle — to the camera), and `RendererRender`, which encodes one frame from
   a `RenderTarget` (command buffer + drawable) handed in by the platform
   layer. `RendererRender` runs a small deferred pipeline: geometry pass ->
   view-space position/normal g-buffer, then full-screen SSAO, box-blur, and
-  lighting passes, the last writing the drawable. See PLAN.md for the SSAO
-  detail.
+  lighting passes, then an optional FXAA pass; the last pass run writes the
+  drawable. See PLAN.md for the SSAO and FXAA detail.
 - **`src/platform_macos.mm`** — the only file allowed to touch AppKit. Owns
   the `NSWindow`, the `MTKView` (+ its delegate, which drives `FrameUpdate`
   then `FrameRender` on every `drawInMTKView:`), the arena allocation, and
-  reading trackpad `NSEvent`s (`scrollWheel:`/`magnifyWithEvent:`) and the
-  `o` key (`keyDown:`) on an `AppMetalView` subclass into the `CameraInput`
+  reading trackpad/mouse `NSEvent`s (`scrollWheel:`/`magnifyWithEvent:`/
+  `rightMouseDragged:`/`otherMouseDragged:`) and the `o`/`f` keys
+  (`keyDown:`) on an `AppMetalView` subclass into the `CameraInput`
   passed to `FrameUpdate`, and forwarding `MTKView`'s
   `drawableSizeWillChange:` to `FrameResize`. A future second platform (e.g.
   iOS) would add a new file at this layer only; `game.*` and

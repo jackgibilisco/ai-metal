@@ -13,12 +13,17 @@ constexpr size_t kArenaSize = 64 * 1024 * 1024;
 constexpr CGFloat kWindowWidth = 960;
 constexpr CGFloat kWindowHeight = 600;
 constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float;
+
+// A mouse wheel reports coarse line-based deltas (~1 per notch); scale them
+// into the same magnification range a trackpad pinch produces.
+constexpr float kMouseWheelZoom = 0.05f;
 } // namespace
 
-// Two-finger trackpad drag and pinch land here as NSEvents, hit-tested to
-// whichever view is under the cursor — they don't require first-responder
-// status the way key events do. Deltas are just accumulated per frame and
-// handed to the renderer in drawInMTKView:, which resets them.
+// Trackpad gestures (two-finger drag, pinch) and mouse events (right-drag,
+// middle-drag, wheel) both land here as NSEvents, hit-tested to whichever view
+// is under the cursor — they don't require first-responder status the way key
+// events do. Deltas are just accumulated per frame and handed to the renderer
+// in drawInMTKView:, which resets them.
 @interface AppMetalView : MTKView
 @property(nonatomic) float pendingPanX;
 @property(nonatomic) float pendingPanY;
@@ -26,6 +31,7 @@ constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float;
 @property(nonatomic) float pendingOrbitYaw;
 @property(nonatomic) float pendingOrbitPitch;
 @property(nonatomic) BOOL pendingCycleDebug;
+@property(nonatomic) BOOL pendingToggleFxaa;
 @end
 
 @implementation AppMetalView
@@ -39,10 +45,18 @@ constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float;
         self.pendingCycleDebug = YES;
         return;
     }
+    if ([event.charactersIgnoringModifiers isEqualToString:@"f"]) {
+        self.pendingToggleFxaa = YES;
+        return;
+    }
     [super keyDown:event];
 }
 
 - (void)scrollWheel:(NSEvent *)event {
+    if (!event.hasPreciseScrollingDeltas) {
+        self.pendingZoom += (float)event.scrollingDeltaY * kMouseWheelZoom;
+        return;
+    }
     bool orbiting = (event.modifierFlags & NSEventModifierFlagShift) != 0;
     if (orbiting) {
         self.pendingOrbitYaw += (float)event.scrollingDeltaX;
@@ -55,6 +69,30 @@ constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float;
 
 - (void)magnifyWithEvent:(NSEvent *)event {
     self.pendingZoom += (float)event.magnification;
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    (void)event;
+}
+
+- (void)otherMouseDown:(NSEvent *)event {
+    (void)event;
+}
+
+- (void)rightMouseDragged:(NSEvent *)event {
+    bool orbiting = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+    if (orbiting) {
+        self.pendingOrbitYaw += (float)event.deltaX;
+        self.pendingOrbitPitch += (float)event.deltaY;
+    } else {
+        self.pendingPanX += (float)event.deltaX;
+        self.pendingPanY += (float)event.deltaY;
+    }
+}
+
+- (void)otherMouseDragged:(NSEvent *)event {
+    self.pendingOrbitYaw += (float)event.deltaX;
+    self.pendingOrbitPitch += (float)event.deltaY;
 }
 
 @end
@@ -85,6 +123,7 @@ constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float;
         .orbitYaw = metalView.pendingOrbitYaw,
         .orbitPitch = metalView.pendingOrbitPitch,
         .cycleDebugView = (bool)metalView.pendingCycleDebug,
+        .toggleFxaa = (bool)metalView.pendingToggleFxaa,
     };
     metalView.pendingPanX = 0.0f;
     metalView.pendingPanY = 0.0f;
@@ -92,6 +131,7 @@ constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float;
     metalView.pendingOrbitYaw = 0.0f;
     metalView.pendingOrbitPitch = 0.0f;
     metalView.pendingCycleDebug = NO;
+    metalView.pendingToggleFxaa = NO;
 
     FrameUpdate(self.arena, deltaTime, cameraInput);
 
