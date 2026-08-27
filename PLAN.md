@@ -45,3 +45,134 @@ doesn't try to `objc_release` garbage bytes.
 7. `Makefile`
 8. Build, run, visually confirm 3 spinning cubes
 9. `CLAUDE.md`
+
+## Feature: File > Import File... (.blend cubes/planes)
+
+### Problem
+Load a Blender `.blend` file containing only cube and plane mesh objects and
+display that scene, via a File menu item.
+
+### Scope decision
+Transform-only import: read each Object's position/rotation/scale and
+classify its linked Mesh as a cube (8 verts) or plane (4 verts), then render
+with the engine's existing built-in unit-cube mesh plus a new built-in plane
+mesh — not a generic arbitrary-geometry importer. Real per-vertex mesh data
+in the file is never read.
+
+### .blend format (Blender 5.x, verified against blender/blender source,
+not memorized/guessed)
+- Whole file is a single zstd stream; decompress up front (streaming API,
+  doesn't rely on embedded content size).
+- 17-byte header: `BLENDER` + `17` (header size) + `-` + `01` (format
+  version) + `v` + 4-digit Blender version. Only this new-format header is
+  supported (pre-5.0 12-byte-header files are out of scope).
+- Format version 1 always uses `LargeBHead8` block headers (32 bytes:
+  `int32 code, int32 sdnaIndex, uint64 oldPointer, int64 length, int64 count`),
+  followed immediately by `length` bytes of block data, until code `ENDB`.
+- ID blocks (Object, Mesh, ...) have `code` <= 0xFFFF: the low 16 bits are
+  the 2-letter ID code ("OB", "ME").
+- The `DNA1` block holds the classic SDNA struct-layout table (magic
+  `SDNA`/`NAME`/`TYPE`/`TLEN`/`STRC` chunks, 4-byte-padded string tables) —
+  unchanged from historical Blender versions. `blend_file.cpp` parses it and
+  uses it to compute each named struct member's byte offset (member sizes
+  sum in declaration order; DNA structs are defined never to need internal
+  padding) so field reads are correct regardless of exact struct layout for
+  the file's Blender version.
+- Needed fields (current DNA field names, read generically by name/size via
+  SDNA so exact byte widths aren't hardcoded): `Object.type` (OB_MESH=1),
+  `Object.data` (pointer to Mesh), `Object.loc[3]`, `Object.rotmode`
+  (0=quaternion via `Object.quat[4]`, else Euler XYZ via `Object.rot[3]`),
+  `Object.scale[3]`, `Mesh.verts_num`.
+
+### Coordinate conversion
+Blender is Z-up; this renderer is Y-up (existing camera/scene convention).
+Imported transforms are converted once, at import time, into engine space
+so the renderer stays completely unaware that "Blender" exists:
+- Position: `(x, y, z)_blender -> (x, z, -y)_render`.
+- Rotation: build the rotation matrix in Blender's own axis convention
+  (`Rz*Ry*Rx` for Euler XYZ, or quaternion-to-matrix), then conjugate by the
+  fixed change-of-basis matrix C (`C * R * C^T`) to get the render-space
+  rotation matrix — computed directly via matrix multiplication, not
+  hand-derived per-axis angle substitution.
+- Scale: same axis permutation as position (Y/Z swap), magnitude only.
+- Cube-only correction: Blender's default cube is 2x2x2 but the engine's
+  built-in cube mesh is a 1x1x1 unit cube, so imported cube scale is
+  doubled. The new plane mesh is authored at 2x2 (half-extent 1) to match
+  Blender's default plane exactly, so no correction is needed there.
+
+### Scene representation
+`GameState` holds a fixed-capacity `SceneObject objects[kMaxSceneObjects]`
+(`kMaxSceneObjects = 128`, pre-allocated at `Init` so `ArenaPush` is still
+only ever called during `Init`, matching the existing arena invariant) plus
+`objectCount`. Each `SceneObject` has position/scale/a precomputed rotation
+matrix, plus `rotationEuler`/`rotationSpeed` used only by objects that spin
+(the 3 demo cubes; imported objects get `rotationSpeed = 0` and are static).
+`GameUpdate` advances `rotationEuler` and rebuilds the rotation matrix only
+for objects with nonzero `rotationSpeed`. Importing a file replaces the
+scene entirely (sets `objectCount` to the imported count).
+
+### New file: `src/blend_file.h/.cpp`
+Pure, portable C++ (no platform/Metal headers), parallel to `math3d.h` as a
+shared low-level utility. Owns zstd decompression, header/block/SDNA
+parsing, and a small by-name field-read API (`BlendFileNextBlock`,
+`BlendFileReadFloatArray`, `BlendFileReadInt`, `BlendFileFollowPointer`).
+Depends on Homebrew's libzstd.
+
+### Known limitations (documented, not silently wrong)
+- Only Blender 5.0+ (new-format) `.blend` files.
+- Only Euler-XYZ and quaternion rotation modes (axis-angle and non-XYZ
+  Euler orders fall back to reading `rot[3]` as XYZ).
+- Mesh classification is vertex-count-based (4 verts = plane, anything else
+  = cube); edited/non-primitive meshes render as whichever built-in shape
+  their vertex count implies.
+- A blend file with more than 128 cube/plane objects is clamped.
+
+## Feature: Trackpad camera controls (pan / pinch-zoom / shift-orbit)
+
+### Problem
+The camera is currently a fixed `Mat4LookAt` computed once in
+`RendererInit` and never touched again. Add trackpad gestures to move it:
+two-finger drag pans, pinch zooms, shift + two-finger drag orbits.
+
+### Scope decision
+The camera is an orbit camera (target point + distance + yaw + pitch), not
+a free-fly camera — matches the existing single-target-at-origin scene and
+keeps the math small (no quaternions/free rotation needed). Camera state
+and update logic live in `RendererState`/`renderer_metal.mm`, since a
+camera is a rendering concern, not gameplay — `GameState` is untouched.
+
+### Data flow
+Gestures are AppKit (`NSEvent`) input, so only `platform_macos.mm` may read
+them, per the existing "only platform_macos.mm touches AppKit" rule. It
+accumulates raw per-frame deltas (trackpad points for pan/orbit, pinch
+magnification for zoom) on a small `AppMetalView : MTKView` subclass by
+overriding `scrollWheel:` (two-finger drag; routed to orbit instead of pan
+when `NSEvent.modifierFlags` has Shift) and `magnifyWithEvent:` (pinch).
+Each frame, `drawInMTKView:` reads and resets those accumulators into a
+`CameraInput{panX, panY, zoomDelta, orbitYaw, orbitPitch}` struct (defined
+in `renderer_metal.h`, plain floats, no AppKit/Metal types) and passes it
+through the existing `FrameUpdate` call — the 3-function `app.h` API is
+unchanged in shape, just gains this one parameter alongside `deltaTime`.
+`FrameUpdate` forwards it to a new `RendererUpdateCamera`, which is where
+all sensitivity/clamping constants live.
+
+### Camera math
+Spherical orbit around `cameraTarget`:
+`eye = target + distance * (cos(pitch)sin(yaw), sin(pitch), cos(pitch)cos(yaw))`,
+looking at `target` with world-up `(0,1,0)` via the existing `Mat4LookAt`.
+- Pan moves `cameraTarget` along the camera's screen-space right/up axes
+  (derived algebraically from yaw/pitch, not a second `Mat4LookAt` call),
+  scaled by `cameraDistance` so pan speed matches the current zoom level.
+- Pinch scales `cameraDistance`, clamped to `[2.5, 60]` so it can't cross
+  the near plane or zoom out past the far plane.
+- Shift-drag adds to yaw/pitch; pitch clamped to +-~86 degrees to avoid
+  the view flipping through the poles.
+- The projection matrix is computed once (aspect ratio is fixed — the
+  window isn't resizable); only the view matrix is recomputed on camera
+  change.
+
+### Known limitations
+- Gesture sign/sensitivity constants are a best-effort default tuned by
+  feel, not measured against a specific trackpad — adjust the constants at
+  the top of `renderer_metal.mm` if a gesture feels inverted or too
+  fast/slow.

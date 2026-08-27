@@ -3,6 +3,7 @@
 
 #import <Cocoa/Cocoa.h>
 #import <MetalKit/MetalKit.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include "app.h"
 #include "arena.h"
@@ -149,14 +150,38 @@ constexpr CGFloat kWindowHeight = 600;
     return YES;
 }
 
+- (void)importBlendFile:(id)sender {
+    (void)sender;
+
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.allowedContentTypes = @[ [UTType typeWithFilenameExtension:@"blend"] ];
+    panel.allowsMultipleSelection = NO;
+    panel.canChooseDirectories = NO;
+
+    if ([panel runModal] != NSModalResponseOK) {
+        return;
+    }
+    NSURL *url = panel.URLs.firstObject;
+    if (url == nil) {
+        return;
+    }
+    ImportBlendFile(&_arena, url.fileSystemRepresentation);
+}
+
 @end
 
 namespace {
 
-void InstallMainMenu() {
+void InstallMainMenu(AppDelegate *delegate) {
     NSMenu *menuBar = [[NSMenu alloc] init];
     NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
     [menuBar addItem:appMenuItem];
+
+    NSMenuItem *fileMenuItem = [[NSMenuItem alloc] initWithTitle:@"File"
+                                                            action:nil
+                                                     keyEquivalent:@""];
+    [menuBar addItem:fileMenuItem];
+
     [NSApp setMainMenu:menuBar];
 
     NSMenu *appMenu = [[NSMenu alloc] init];
@@ -166,6 +191,14 @@ void InstallMainMenu() {
                                                 keyEquivalent:@"q"];
     [appMenu addItem:quitItem];
     [appMenuItem setSubmenu:appMenu];
+
+    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
+    NSMenuItem *importItem = [[NSMenuItem alloc] initWithTitle:@"Import File…"
+                                                          action:@selector(importBlendFile:)
+                                                   keyEquivalent:@""];
+    [importItem setTarget:delegate];
+    [fileMenu addItem:importItem];
+    [fileMenuItem setSubmenu:fileMenu];
 }
 
 } // namespace
@@ -177,8 +210,8 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-        InstallMainMenu();
         AppDelegate *delegate = [[AppDelegate alloc] init];
+        InstallMainMenu(delegate);
         [NSApp setDelegate:delegate];
         [NSApp run];
     }

@@ -13,3 +13,6 @@ void Init(Arena *arena, id<MTLDevice> device, MTLPixelFormat colorFormat,
           MTLPixelFormat depthFormat, float aspectRatio);
 void FrameUpdate(Arena *arena, float deltaTime, CameraInput cameraInput);
 void FrameRender(Arena *arena, RenderTarget target);
+
+// Called by the platform layer's File > Import File... menu action.
+bool ImportBlendFile(Arena *arena, const char *filepath);

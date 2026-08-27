@@ -65,6 +65,34 @@ inline Mat4 Mat4RotationY(float radians) {
     return result;
 }
 
+inline Mat4 Mat4RotationZ(float radians) {
+    Mat4 result = Mat4Identity();
+    float c = cosf(radians);
+    float s = sinf(radians);
+    result.m[0] = c;
+    result.m[1] = s;
+    result.m[4] = -s;
+    result.m[5] = c;
+    return result;
+}
+
+inline Mat4 Mat4Scale(Vec3 s) {
+    Mat4 result = Mat4Identity();
+    result.m[0] = s.x;
+    result.m[5] = s.y;
+    result.m[10] = s.z;
+    return result;
+}
+
+// Blender's default ('XYZ') Euler order: intrinsic rotation X, then Y, then
+// Z, equivalent to the fixed-axis matrix product Rz * Ry * Rx applied to a
+// column vector.
+inline Mat4 Mat4EulerXYZ(Vec3 radians) {
+    Mat4 rotation = Mat4Multiply(Mat4RotationY(radians.y), Mat4RotationX(radians.x));
+    rotation = Mat4Multiply(Mat4RotationZ(radians.z), rotation);
+    return rotation;
+}
+
 inline Mat4 Mat4Perspective(float fovYRadians, float aspect, float nearZ, float farZ) {
     Mat4 result = {};
     float yScale = 1.0f / tanf(fovYRadians * 0.5f);

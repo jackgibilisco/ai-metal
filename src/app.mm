@@ -30,3 +30,8 @@ void FrameRender(Arena *arena, RenderTarget target) {
     AppState *appState = (AppState *)arena->base;
     RendererRender(appState->renderer, appState->game, target);
 }
+
+bool ImportBlendFile(Arena *arena, const char *filepath) {
+    AppState *appState = (AppState *)arena->base;
+    return GameImportBlendFile(appState->game, filepath);
+}

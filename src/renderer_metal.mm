@@ -5,13 +5,13 @@
 
 namespace {
 
-struct CubeVertex {
+struct MeshVertex {
     float position[3];
     float normal[3];
 };
 
-// One 256-byte-aligned slot per cube in the uniform buffer (256 is Metal's
-// minimum constant buffer offset alignment on macOS).
+// One 256-byte-aligned slot per object in the uniform buffer (256 is
+// Metal's minimum constant buffer offset alignment on macOS).
 constexpr size_t kUniformStride = 256;
 
 // Orbit-camera feel. Tuned by hand, not measured against a specific
@@ -28,7 +28,7 @@ struct Uniforms {
 };
 
 // clang-format off
-const CubeVertex kCubeVertices[] = {
+const MeshVertex kCubeVertices[] = {
     // +X
     {{0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
     {{0.5f,  0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
@@ -68,6 +68,20 @@ const uint16_t kCubeIndices[] = {
     12, 13, 14, 12, 14, 15,
     16, 17, 18, 16, 18, 19,
     20, 21, 22, 20, 22, 23,
+};
+
+// A flat quad in the XZ plane (normal +Y), half-extent 1 to match Blender's
+// default plane size exactly, so no import-time scale correction is needed
+// for planes the way there is for cubes.
+const MeshVertex kPlaneVertices[] = {
+    {{-1.0f, 0.0f, -1.0f}, {0.0f, 1.0f, 0.0f}},
+    {{-1.0f, 0.0f,  1.0f}, {0.0f, 1.0f, 0.0f}},
+    {{ 1.0f, 0.0f,  1.0f}, {0.0f, 1.0f, 0.0f}},
+    {{ 1.0f, 0.0f, -1.0f}, {0.0f, 1.0f, 0.0f}},
+};
+
+const uint16_t kPlaneIndices[] = {
+    0, 1, 2, 0, 2, 3,
 };
 // clang-format on
 
@@ -135,8 +149,10 @@ struct RendererState {
     id<MTLDevice> device;
     id<MTLRenderPipelineState> pipelineState;
     id<MTLDepthStencilState> depthState;
-    id<MTLBuffer> vertexBuffer;
-    id<MTLBuffer> indexBuffer;
+    id<MTLBuffer> cubeVertexBuffer;
+    id<MTLBuffer> cubeIndexBuffer;
+    id<MTLBuffer> planeVertexBuffer;
+    id<MTLBuffer> planeIndexBuffer;
     id<MTLBuffer> uniformBuffer;
     Mat4 projection;
     Mat4 viewProjection;
@@ -144,7 +160,8 @@ struct RendererState {
     float cameraDistance;
     float cameraYaw;
     float cameraPitch;
-    uint32_t indexCount;
+    uint32_t cubeIndexCount;
+    uint32_t planeIndexCount;
 };
 
 RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
@@ -152,15 +169,22 @@ RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
                              float aspectRatio) {
     RendererState *state = ArenaPushStruct(arena, RendererState);
     state->device = device;
-    state->indexCount = sizeof(kCubeIndices) / sizeof(kCubeIndices[0]);
+    state->cubeIndexCount = sizeof(kCubeIndices) / sizeof(kCubeIndices[0]);
+    state->planeIndexCount = sizeof(kPlaneIndices) / sizeof(kPlaneIndices[0]);
 
-    state->vertexBuffer = [device newBufferWithBytes:kCubeVertices
-                                               length:sizeof(kCubeVertices)
-                                              options:MTLResourceStorageModeShared];
-    state->indexBuffer = [device newBufferWithBytes:kCubeIndices
-                                              length:sizeof(kCubeIndices)
-                                             options:MTLResourceStorageModeShared];
-    state->uniformBuffer = [device newBufferWithLength:kUniformStride * kCubeCount
+    state->cubeVertexBuffer = [device newBufferWithBytes:kCubeVertices
+                                                    length:sizeof(kCubeVertices)
+                                                   options:MTLResourceStorageModeShared];
+    state->cubeIndexBuffer = [device newBufferWithBytes:kCubeIndices
+                                                   length:sizeof(kCubeIndices)
+                                                  options:MTLResourceStorageModeShared];
+    state->planeVertexBuffer = [device newBufferWithBytes:kPlaneVertices
+                                                     length:sizeof(kPlaneVertices)
+                                                    options:MTLResourceStorageModeShared];
+    state->planeIndexBuffer = [device newBufferWithBytes:kPlaneIndices
+                                                    length:sizeof(kPlaneIndices)
+                                                   options:MTLResourceStorageModeShared];
+    state->uniformBuffer = [device newBufferWithLength:kUniformStride * kMaxSceneObjects
                                                 options:MTLResourceStorageModeShared];
 
     NSError *error = nil;
@@ -177,12 +201,12 @@ RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
 
     MTLVertexDescriptor *vertexDescriptor = [[MTLVertexDescriptor alloc] init];
     vertexDescriptor.attributes[0].format = MTLVertexFormatFloat3;
-    vertexDescriptor.attributes[0].offset = offsetof(CubeVertex, position);
+    vertexDescriptor.attributes[0].offset = offsetof(MeshVertex, position);
     vertexDescriptor.attributes[0].bufferIndex = 0;
     vertexDescriptor.attributes[1].format = MTLVertexFormatFloat3;
-    vertexDescriptor.attributes[1].offset = offsetof(CubeVertex, normal);
+    vertexDescriptor.attributes[1].offset = offsetof(MeshVertex, normal);
     vertexDescriptor.attributes[1].bufferIndex = 0;
-    vertexDescriptor.layouts[0].stride = sizeof(CubeVertex);
+    vertexDescriptor.layouts[0].stride = sizeof(MeshVertex);
 
     MTLRenderPipelineDescriptor *pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     pipelineDescriptor.vertexFunction = vertexFunction;
@@ -257,15 +281,14 @@ void RendererRender(RendererState *renderer, const GameState *game, RenderTarget
     [encoder setDepthStencilState:renderer->depthState];
     [encoder setCullMode:MTLCullModeBack];
     [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
-    [encoder setVertexBuffer:renderer->vertexBuffer offset:0 atIndex:0];
 
     uint8_t *uniformContents = (uint8_t *)[renderer->uniformBuffer contents];
 
-    for (int i = 0; i < kCubeCount; ++i) {
-        const Cube &cube = game->cubes[i];
+    for (int i = 0; i < game->objectCount; ++i) {
+        const SceneObject &object = game->objects[i];
 
-        Mat4 rotation = Mat4Multiply(Mat4RotationY(cube.rotation.y), Mat4RotationX(cube.rotation.x));
-        Mat4 model = Mat4Multiply(Mat4Translation(cube.position), rotation);
+        Mat4 model = Mat4Multiply(Mat4Translation(object.position),
+                                   Mat4Multiply(object.rotation, Mat4Scale(object.scale)));
         Mat4 modelViewProjection = Mat4Multiply(renderer->viewProjection, model);
 
         Uniforms uniforms;
@@ -275,11 +298,17 @@ void RendererRender(RendererState *renderer, const GameState *game, RenderTarget
         size_t offset = i * kUniformStride;
         memcpy(uniformContents + offset, &uniforms, sizeof(Uniforms));
 
+        bool isCube = object.primitive == Primitive::Cube;
+        id<MTLBuffer> vertexBuffer = isCube ? renderer->cubeVertexBuffer : renderer->planeVertexBuffer;
+        id<MTLBuffer> indexBuffer = isCube ? renderer->cubeIndexBuffer : renderer->planeIndexBuffer;
+        uint32_t indexCount = isCube ? renderer->cubeIndexCount : renderer->planeIndexCount;
+
+        [encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
         [encoder setVertexBuffer:renderer->uniformBuffer offset:offset atIndex:1];
         [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                             indexCount:renderer->indexCount
+                             indexCount:indexCount
                               indexType:MTLIndexTypeUInt16
-                            indexBuffer:renderer->indexBuffer
+                            indexBuffer:indexBuffer
                       indexBufferOffset:0];
     }
 
