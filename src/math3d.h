@@ -107,6 +107,14 @@ inline Mat4 Mat4Perspective(float fovYRadians, float aspect, float nearZ, float 
     return result;
 }
 
+inline Vec3 Mat4TransformDirection(const Mat4 &m, Vec3 direction) {
+    return Vec3{
+        m.m[0] * direction.x + m.m[4] * direction.y + m.m[8] * direction.z,
+        m.m[1] * direction.x + m.m[5] * direction.y + m.m[9] * direction.z,
+        m.m[2] * direction.x + m.m[6] * direction.y + m.m[10] * direction.z,
+    };
+}
+
 inline Mat4 Mat4LookAt(Vec3 eye, Vec3 target, Vec3 up) {
     Vec3 zAxis = {eye.x - target.x, eye.y - target.y, eye.z - target.z};
     float zLen = sqrtf(zAxis.x * zAxis.x + zAxis.y * zAxis.y + zAxis.z * zAxis.z);

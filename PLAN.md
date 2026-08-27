@@ -167,12 +167,89 @@ looking at `target` with world-up `(0,1,0)` via the existing `Mat4LookAt`.
   the near plane or zoom out past the far plane.
 - Shift-drag adds to yaw/pitch; pitch clamped to +-~86 degrees to avoid
   the view flipping through the poles.
-- The projection matrix is computed once (aspect ratio is fixed — the
-  window isn't resizable); only the view matrix is recomputed on camera
-  change.
+- The projection matrix is recomputed only when the drawable size
+  changes (see the resizable-window feature); on a camera change only the
+  view matrix is rebuilt.
 
 ### Known limitations
 - Gesture sign/sensitivity constants are a best-effort default tuned by
   feel, not measured against a specific trackpad — adjust the constants at
   the top of `renderer_metal.mm` if a gesture feels inverted or too
   fast/slow.
+
+## Feature: Resizable window without image distortion
+
+### Problem
+The window is fixed-size. Making it resizable naively would stretch the
+cubes, because the perspective projection's aspect ratio is baked in once
+at `RendererInit` and never updated.
+
+### Change
+- `platform_macos.mm`: add `NSWindowStyleMaskResizable` to the window
+  style mask.
+- Route drawable-size changes to the renderer. `MTKView`'s delegate
+  already gets `mtkView:drawableSizeWillChange:` (fired once at startup
+  and on every resize); implement it to call a new `FrameResize(arena,
+  aspectRatio)` on the `app.h` API, which forwards to a new
+  `RendererResize(renderer, aspectRatio)`.
+- `RendererResize` rebuilds `projection` from the new aspect ratio (same
+  fov / near / far as `RendererInit`) and recomposes `viewProjection`
+  from the current camera. The camera code path is unchanged.
+
+### Notes
+- Aspect ratio is `drawableSize.width / drawableSize.height` (pixels), not
+  point size; for a plain perspective matrix the ratio is what matters and
+  the two agree, but using the drawable size keeps it correct if a
+  content-scale change ever fires this callback on its own.
+
+## Feature: Screen-space ambient occlusion
+
+### Problem
+The scene is lit by a single directional light plus a flat ambient term,
+so surfaces in contact (a cube meeting the floor, two cubes touching) have
+no darkening between them and the scene reads as flat. Add SSAO so
+crevices and contact points are occluded.
+
+### Approach
+Screen-space, so it works for the demo cubes and any imported `.blend`
+scene without per-object work. This turns the single forward pass into a
+small deferred pipeline, all encoded on the platform's one command buffer
+in `RendererRender`:
+
+1. **Geometry pass** -> two `RGBA16Float` render targets: view-space
+   position (`.w = 1` marks a written texel) and view-space normal, plus a
+   private depth target. Same vertex/index buffers and cull state as the
+   old forward pass; the per-object uniform is now `{modelViewProjection,
+   modelView}`.
+2. **AO pass** (full-screen triangle) -> `R8Unorm`. Classic hemisphere
+   kernel: 32 sample offsets (generated once at init, biased toward the
+   origin) rotated per-pixel by a tiled 4x4 noise texture, each projected
+   back to screen space and depth-compared against the position target. A
+   `smoothstep` range check rejects occluders across large depth gaps.
+3. **Blur pass** (full-screen) -> `R8Unorm`. 4x4 box blur, matching the
+   noise tile size, to remove the per-pixel noise the rotation adds.
+4. **Lighting pass** (full-screen) -> the drawable. Reads position,
+   normal, and blurred AO; applies `base * (0.35 * ao + 0.65 * diffuse)`
+   with the light direction transformed into view space on the CPU.
+   Background texels (position `.w == 0`) get the old clear color.
+
+### G-buffer / AO / blur targets
+Owned by `RendererState`, sized to the drawable, and the one set of
+resources the renderer (re)creates outside `Init` — `AllocateScreenTargets`
+runs from `RendererResize` whenever the size actually changes. The arena
+invariant is unaffected: these are Metal allocations, not `ArenaPush`.
+
+### Tuning / debug
+`kAoRadius` / `kAoBias` / `kAoPower` are constants at the top of
+`renderer_metal.mm`. The `o` key cycles a debug view
+(`CameraInput.cycleDebugView` -> `RendererState.debugMode`): 0 = normal,
+1 = raw AO buffer, 2 = AO disabled.
+
+### Known limitations
+- Radius is a single world-space constant tuned for ~1-unit geometry; very
+  large or very small imported scenes may need it adjusted.
+- Normals are `modelView * normal` with no inverse-transpose, so a
+  non-uniformly scaled imported object has slightly skewed AO normals
+  (same simplification the original forward shader made).
+- No half-resolution AO or temporal accumulation; the blur is the only
+  denoise.

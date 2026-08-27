@@ -12,7 +12,6 @@
 
 struct RenderTarget {
     id<MTLCommandBuffer> commandBuffer;
-    MTLRenderPassDescriptor *passDescriptor;
     id<CAMetalDrawable> drawable;
 };
 
@@ -27,10 +26,12 @@ struct CameraInput {
     float zoomDelta;  // pinch magnification
     float orbitYaw;   // shift + two-finger drag, points
     float orbitPitch; // shift + two-finger drag, points
+    bool cycleDebugView; // one keypress: advance the AO debug view mode
 };
 
 RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
                              MTLPixelFormat colorFormat, MTLPixelFormat depthFormat,
-                             float aspectRatio);
+                             float drawableWidth, float drawableHeight);
+void RendererResize(RendererState *renderer, float drawableWidth, float drawableHeight);
 void RendererUpdateCamera(RendererState *renderer, CameraInput input);
 void RendererRender(RendererState *renderer, const GameState *game, RenderTarget target);

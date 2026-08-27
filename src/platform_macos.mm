@@ -12,6 +12,7 @@ namespace {
 constexpr size_t kArenaSize = 64 * 1024 * 1024;
 constexpr CGFloat kWindowWidth = 960;
 constexpr CGFloat kWindowHeight = 600;
+constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float;
 } // namespace
 
 // Two-finger trackpad drag and pinch land here as NSEvents, hit-tested to
@@ -24,9 +25,22 @@ constexpr CGFloat kWindowHeight = 600;
 @property(nonatomic) float pendingZoom;
 @property(nonatomic) float pendingOrbitYaw;
 @property(nonatomic) float pendingOrbitPitch;
+@property(nonatomic) BOOL pendingCycleDebug;
 @end
 
 @implementation AppMetalView
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (void)keyDown:(NSEvent *)event {
+    if ([event.charactersIgnoringModifiers isEqualToString:@"o"]) {
+        self.pendingCycleDebug = YES;
+        return;
+    }
+    [super keyDown:event];
+}
 
 - (void)scrollWheel:(NSEvent *)event {
     bool orbiting = (event.modifierFlags & NSEventModifierFlagShift) != 0;
@@ -55,7 +69,7 @@ constexpr CGFloat kWindowHeight = 600;
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
     (void)view;
-    (void)size;
+    FrameResize(self.arena, (float)size.width, (float)size.height);
 }
 
 - (void)drawInMTKView:(MTKView *)view {
@@ -70,24 +84,24 @@ constexpr CGFloat kWindowHeight = 600;
         .zoomDelta = metalView.pendingZoom,
         .orbitYaw = metalView.pendingOrbitYaw,
         .orbitPitch = metalView.pendingOrbitPitch,
+        .cycleDebugView = (bool)metalView.pendingCycleDebug,
     };
     metalView.pendingPanX = 0.0f;
     metalView.pendingPanY = 0.0f;
     metalView.pendingZoom = 0.0f;
     metalView.pendingOrbitYaw = 0.0f;
     metalView.pendingOrbitPitch = 0.0f;
+    metalView.pendingCycleDebug = NO;
 
     FrameUpdate(self.arena, deltaTime, cameraInput);
 
     id<CAMetalDrawable> drawable = view.currentDrawable;
-    MTLRenderPassDescriptor *passDescriptor = view.currentRenderPassDescriptor;
-    if (drawable == nil || passDescriptor == nil) {
+    if (drawable == nil) {
         return;
     }
 
     RenderTarget target;
     target.commandBuffer = [self.commandQueue commandBuffer];
-    target.passDescriptor = passDescriptor;
     target.drawable = drawable;
 
     FrameRender(self.arena, target);
@@ -116,8 +130,8 @@ constexpr CGFloat kWindowHeight = 600;
     _arena = ArenaCreate(_arenaMemory, kArenaSize);
 
     NSRect frame = NSMakeRect(0, 0, kWindowWidth, kWindowHeight);
-    NSWindowStyleMask styleMask =
-        NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;
+    NSWindowStyleMask styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                                  NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
     self.window = [[NSWindow alloc] initWithContentRect:frame
                                                styleMask:styleMask
                                                  backing:NSBackingStoreBuffered
@@ -129,11 +143,10 @@ constexpr CGFloat kWindowHeight = 600;
 
     self.view = [[AppMetalView alloc] initWithFrame:frame device:device];
     self.view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
-    self.view.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
-    self.view.clearColor = MTLClearColorMake(0.05, 0.05, 0.08, 1.0);
 
-    float aspectRatio = (float)(frame.size.width / frame.size.height);
-    Init(&_arena, device, self.view.colorPixelFormat, self.view.depthStencilPixelFormat, aspectRatio);
+    CGSize drawableSize = self.view.drawableSize;
+    Init(&_arena, device, self.view.colorPixelFormat, kDepthFormat, (float)drawableSize.width,
+         (float)drawableSize.height);
 
     self.viewDelegate = [[AppViewDelegate alloc] init];
     self.viewDelegate.arena = &_arena;
@@ -142,6 +155,7 @@ constexpr CGFloat kWindowHeight = 600;
 
     [self.window setContentView:self.view];
     [self.window makeKeyAndOrderFront:nil];
+    [self.window makeFirstResponder:self.view];
     [NSApp activateIgnoringOtherApps:YES];
 }
 
