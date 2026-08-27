@@ -287,13 +287,12 @@ void BlendFileClose(BlendFile *file) {
     delete file;
 }
 
-const void *BlendFileNextBlock(BlendFile *file, const char *idCode,
-                                const void *previousBlock, int *outStructIndex) {
+BlendBlock BlendFileNextBlock(BlendFile *file, const char *idCode, BlendBlock previousBlock) {
     int32_t wantCode = MakeBlockCode(idCode[0], idCode[1]);
     size_t startIndex = 0;
     if (previousBlock) {
         for (size_t i = 0; i < file->blocks.size(); ++i) {
-            if (file->blocks[i].data == previousBlock) {
+            if (file->blocks[i].data == previousBlock.data) {
                 startIndex = i + 1;
                 break;
             }
@@ -301,33 +300,31 @@ const void *BlendFileNextBlock(BlendFile *file, const char *idCode,
     }
     for (size_t i = startIndex; i < file->blocks.size(); ++i) {
         if (file->blocks[i].code == wantCode) {
-            if (outStructIndex) *outStructIndex = file->blocks[i].structIndex;
-            return file->blocks[i].data;
+            return BlendBlock{file->blocks[i].data, file->blocks[i].structIndex};
         }
     }
-    return nullptr;
+    return {};
 }
 
-bool BlendFileReadFloatArray(BlendFile *file, const void *structData, int structIndex,
+bool BlendFileReadFloatArray(BlendFile *file, BlendBlock block,
                               const char *fieldName, float *out, int count) {
     int64_t offset, size;
-    if (!FindMember(file->sdna, structIndex, fieldName, &offset, &size)) {
+    if (!FindMember(file->sdna, block.structIndex, fieldName, &offset, &size)) {
         return false;
     }
     if (size < (int64_t)sizeof(float) * count) {
         return false;
     }
-    memcpy(out, (const uint8_t *)structData + offset, sizeof(float) * count);
+    memcpy(out, (const uint8_t *)block.data + offset, sizeof(float) * count);
     return true;
 }
 
-bool BlendFileReadInt(BlendFile *file, const void *structData, int structIndex,
-                       const char *fieldName, int32_t *out) {
+bool BlendFileReadInt(BlendFile *file, BlendBlock block, const char *fieldName, int32_t *out) {
     int64_t offset, size;
-    if (!FindMember(file->sdna, structIndex, fieldName, &offset, &size)) {
+    if (!FindMember(file->sdna, block.structIndex, fieldName, &offset, &size)) {
         return false;
     }
-    const uint8_t *p = (const uint8_t *)structData + offset;
+    const uint8_t *p = (const uint8_t *)block.data + offset;
     switch (size) {
         case 1: *out = *(const int8_t *)p; return true;
         case 2: *out = *(const int16_t *)p; return true;
@@ -337,23 +334,21 @@ bool BlendFileReadInt(BlendFile *file, const void *structData, int structIndex,
     }
 }
 
-const void *BlendFileFollowPointer(BlendFile *file, const void *structData, int structIndex,
-                                    const char *fieldName, int *outStructIndex) {
+BlendBlock BlendFileFollowPointer(BlendFile *file, BlendBlock block, const char *fieldName) {
     int64_t offset, size;
     std::string starName = std::string("*") + fieldName;
-    if (!FindMember(file->sdna, structIndex, starName, &offset, &size) || size != 8) {
-        return nullptr;
+    if (!FindMember(file->sdna, block.structIndex, starName, &offset, &size) || size != 8) {
+        return {};
     }
     uint64_t pointerValue;
-    memcpy(&pointerValue, (const uint8_t *)structData + offset, 8);
+    memcpy(&pointerValue, (const uint8_t *)block.data + offset, 8);
     if (pointerValue == 0) {
-        return nullptr;
+        return {};
     }
-    for (const Block &block : file->blocks) {
-        if (block.oldPointer == pointerValue) {
-            if (outStructIndex) *outStructIndex = block.structIndex;
-            return block.data;
+    for (const Block &candidate : file->blocks) {
+        if (candidate.oldPointer == pointerValue) {
+            return BlendBlock{candidate.data, candidate.structIndex};
         }
     }
-    return nullptr;
+    return {};
 }

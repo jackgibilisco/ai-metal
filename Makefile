@@ -4,7 +4,7 @@ CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -fobjc-arc -I$(ZSTD_PREFIX)/include
 FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework UniformTypeIdentifiers
 LDFLAGS := -L$(ZSTD_PREFIX)/lib -lzstd
 
-SRC_CPP := src/arena.cpp src/game.cpp src/blend_file.cpp
+SRC_CPP := src/arena.cpp src/game.cpp src/scene_import.cpp src/blend_file.cpp
 SRC_MM := src/renderer_metal.mm src/app.mm src/platform_macos.mm
 
 BUILD_DIR := build
