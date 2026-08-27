@@ -480,14 +480,19 @@ constexpr float kMouseWheelZoom = 0.05f;
     panel.allowsMultipleSelection = NO;
     panel.canChooseDirectories = NO;
 
-    if ([panel runModal] != NSModalResponseOK) {
-        return;
-    }
-    NSURL *url = panel.URLs.firstObject;
-    if (url == nil) {
-        return;
-    }
-    ImportBlendFile(&_arena, url.fileSystemRepresentation);
+    // Present as an async sheet, not runModal: opening the panel spins up an
+    // XPC service on first use, and runModal blocks the main thread through
+    // that round-trip, freezing the display-link frame loop for a few frames.
+    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+        if (result != NSModalResponseOK) {
+            return;
+        }
+        NSURL *url = panel.URLs.firstObject;
+        if (url == nil) {
+            return;
+        }
+        ImportBlendFile(&self->_arena, url.fileSystemRepresentation);
+    }];
 }
 
 @end
