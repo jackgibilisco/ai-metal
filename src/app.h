@@ -11,5 +11,5 @@
 
 void Init(Arena *arena, id<MTLDevice> device, MTLPixelFormat colorFormat,
           MTLPixelFormat depthFormat, float aspectRatio);
-void FrameUpdate(Arena *arena, float deltaTime);
+void FrameUpdate(Arena *arena, float deltaTime, CameraInput cameraInput);
 void FrameRender(Arena *arena, RenderTarget target);

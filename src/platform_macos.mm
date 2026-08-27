@@ -13,6 +13,37 @@ constexpr CGFloat kWindowWidth = 960;
 constexpr CGFloat kWindowHeight = 600;
 } // namespace
 
+// Two-finger trackpad drag and pinch land here as NSEvents, hit-tested to
+// whichever view is under the cursor — they don't require first-responder
+// status the way key events do. Deltas are just accumulated per frame and
+// handed to the renderer in drawInMTKView:, which resets them.
+@interface AppMetalView : MTKView
+@property(nonatomic) float pendingPanX;
+@property(nonatomic) float pendingPanY;
+@property(nonatomic) float pendingZoom;
+@property(nonatomic) float pendingOrbitYaw;
+@property(nonatomic) float pendingOrbitPitch;
+@end
+
+@implementation AppMetalView
+
+- (void)scrollWheel:(NSEvent *)event {
+    bool orbiting = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+    if (orbiting) {
+        self.pendingOrbitYaw += (float)event.scrollingDeltaX;
+        self.pendingOrbitPitch += (float)event.scrollingDeltaY;
+    } else {
+        self.pendingPanX += (float)event.scrollingDeltaX;
+        self.pendingPanY += (float)event.scrollingDeltaY;
+    }
+}
+
+- (void)magnifyWithEvent:(NSEvent *)event {
+    self.pendingZoom += (float)event.magnification;
+}
+
+@end
+
 @interface AppViewDelegate : NSObject <MTKViewDelegate>
 @property(nonatomic) Arena *arena;
 @property(nonatomic) id<MTLCommandQueue> commandQueue;
@@ -31,7 +62,21 @@ constexpr CGFloat kWindowHeight = 600;
     float deltaTime = (self.lastTime == 0) ? 0.0f : (float)(now - self.lastTime);
     self.lastTime = now;
 
-    FrameUpdate(self.arena, deltaTime);
+    AppMetalView *metalView = (AppMetalView *)view;
+    CameraInput cameraInput = {
+        .panX = metalView.pendingPanX,
+        .panY = metalView.pendingPanY,
+        .zoomDelta = metalView.pendingZoom,
+        .orbitYaw = metalView.pendingOrbitYaw,
+        .orbitPitch = metalView.pendingOrbitPitch,
+    };
+    metalView.pendingPanX = 0.0f;
+    metalView.pendingPanY = 0.0f;
+    metalView.pendingZoom = 0.0f;
+    metalView.pendingOrbitYaw = 0.0f;
+    metalView.pendingOrbitPitch = 0.0f;
+
+    FrameUpdate(self.arena, deltaTime, cameraInput);
 
     id<CAMetalDrawable> drawable = view.currentDrawable;
     MTLRenderPassDescriptor *passDescriptor = view.currentRenderPassDescriptor;
@@ -54,7 +99,7 @@ constexpr CGFloat kWindowHeight = 600;
     void *_arenaMemory;
 }
 @property(nonatomic) NSWindow *window;
-@property(nonatomic) MTKView *view;
+@property(nonatomic) AppMetalView *view;
 @property(nonatomic) AppViewDelegate *viewDelegate;
 @end
 
@@ -81,7 +126,7 @@ constexpr CGFloat kWindowHeight = 600;
 
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
 
-    self.view = [[MTKView alloc] initWithFrame:frame device:device];
+    self.view = [[AppMetalView alloc] initWithFrame:frame device:device];
     self.view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
     self.view.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
     self.view.clearColor = MTLClearColorMake(0.05, 0.05, 0.08, 1.0);

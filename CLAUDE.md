@@ -39,7 +39,7 @@ The public API the platform layer drives is exactly three functions
 
 ```
 Init(arena, device, colorFormat, depthFormat, aspectRatio)   // once
-FrameUpdate(arena, deltaTime)                                // every frame
+FrameUpdate(arena, deltaTime, cameraInput)                   // every frame
 FrameRender(arena, RenderTarget)                             // every frame
 ```
 
@@ -57,13 +57,17 @@ Three layers, each with a different portability contract:
   simulation/gameplay rather than rendering.
 - **`src/renderer_metal.h`/`.mm`** — Metal-specific but OS-agnostic: it never
   touches AppKit/UIKit, only the Metal API. Owns `RendererState` (device,
-  pipeline, depth state, vertex/index/uniform buffers), cube mesh data, the
-  embedded shader source, and `RendererRender`, which encodes one frame from
-  a `RenderTarget` (command buffer + pass descriptor + drawable) handed in by
+  pipeline, depth state, vertex/index/uniform buffers, orbit-camera state),
+  cube mesh data, the embedded shader source, `RendererUpdateCamera` (applies
+  a frame's `CameraInput` — trackpad pan/pinch-zoom/shift-orbit deltas — to
+  the camera), and `RendererRender`, which encodes one frame from a
+  `RenderTarget` (command buffer + pass descriptor + drawable) handed in by
   the platform layer.
 - **`src/platform_macos.mm`** — the only file allowed to touch AppKit. Owns
   the `NSWindow`, the `MTKView` (+ its delegate, which drives `FrameUpdate`
-  then `FrameRender` on every `drawInMTKView:`), and the arena allocation. A
+  then `FrameRender` on every `drawInMTKView:`), the arena allocation, and
+  reading trackpad `NSEvent`s (`scrollWheel:`/`magnifyWithEvent:` on an
+  `AppMetalView` subclass) into the `CameraInput` passed to `FrameUpdate`. A
   future second platform (e.g. iOS) would add a new file at this layer only;
   `game.*` and `renderer_metal.*` are unchanged.
 

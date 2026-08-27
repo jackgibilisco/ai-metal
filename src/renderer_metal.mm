@@ -14,6 +14,14 @@ struct CubeVertex {
 // minimum constant buffer offset alignment on macOS).
 constexpr size_t kUniformStride = 256;
 
+// Orbit-camera feel. Tuned by hand, not measured against a specific
+// trackpad — adjust here if a gesture feels inverted or too fast/slow.
+constexpr float kPanSensitivity = 0.0025f;  // world units per point, per unit of distance
+constexpr float kOrbitSensitivity = 0.006f; // radians per point
+constexpr float kMinCameraDistance = 2.5f;
+constexpr float kMaxCameraDistance = 60.0f;
+constexpr float kMaxCameraPitch = 1.5f; // radians; keeps the view short of the poles
+
 struct Uniforms {
     Mat4 modelViewProjection;
     Mat4 model;
@@ -98,6 +106,29 @@ fragment float4 fragment_main(VertexOut in [[stage_in]]) {
 }
 )";
 
+float Clamp(float value, float minValue, float maxValue) {
+    if (value < minValue) return minValue;
+    if (value > maxValue) return maxValue;
+    return value;
+}
+
+// eye = target + distance * sphericalDirection(yaw, pitch), looking at
+// target with world-up (0, 1, 0). yaw is measured from +Z toward +X.
+Mat4 OrbitCameraViewMatrix(Vec3 target, float distance, float yaw, float pitch) {
+    Vec3 direction = {
+        cosf(pitch) * sinf(yaw),
+        sinf(pitch),
+        cosf(pitch) * cosf(yaw),
+    };
+    Vec3 eye = {
+        target.x + distance * direction.x,
+        target.y + distance * direction.y,
+        target.z + distance * direction.z,
+    };
+    Vec3 up = {0.0f, 1.0f, 0.0f};
+    return Mat4LookAt(eye, target, up);
+}
+
 } // namespace
 
 struct RendererState {
@@ -107,7 +138,12 @@ struct RendererState {
     id<MTLBuffer> vertexBuffer;
     id<MTLBuffer> indexBuffer;
     id<MTLBuffer> uniformBuffer;
+    Mat4 projection;
     Mat4 viewProjection;
+    Vec3 cameraTarget;
+    float cameraDistance;
+    float cameraYaw;
+    float cameraPitch;
     uint32_t indexCount;
 };
 
@@ -168,14 +204,49 @@ RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
     depthDescriptor.depthWriteEnabled = YES;
     state->depthState = [device newDepthStencilStateWithDescriptor:depthDescriptor];
 
-    Vec3 eye = {0.0f, 3.5f, 12.0f};
-    Vec3 target = {0.0f, 0.0f, 0.0f};
-    Vec3 up = {0.0f, 1.0f, 0.0f};
-    Mat4 view = Mat4LookAt(eye, target, up);
-    Mat4 projection = Mat4Perspective(60.0f * (float)M_PI / 180.0f, aspectRatio, 0.1f, 100.0f);
-    state->viewProjection = Mat4Multiply(projection, view);
+    // Derive the initial orbit parameters from the original fixed eye/target
+    // so the starting view is unchanged from before camera controls existed.
+    Vec3 initialEye = {0.0f, 3.5f, 12.0f};
+    state->cameraTarget = Vec3{0.0f, 0.0f, 0.0f};
+    Vec3 offset = {initialEye.x - state->cameraTarget.x, initialEye.y - state->cameraTarget.y,
+                    initialEye.z - state->cameraTarget.z};
+    state->cameraDistance = sqrtf(offset.x * offset.x + offset.y * offset.y + offset.z * offset.z);
+    state->cameraYaw = atan2f(offset.x, offset.z);
+    state->cameraPitch = asinf(offset.y / state->cameraDistance);
+
+    state->projection = Mat4Perspective(60.0f * (float)M_PI / 180.0f, aspectRatio, 0.1f, 100.0f);
+    Mat4 view = OrbitCameraViewMatrix(state->cameraTarget, state->cameraDistance, state->cameraYaw,
+                                       state->cameraPitch);
+    state->viewProjection = Mat4Multiply(state->projection, view);
 
     return state;
+}
+
+void RendererUpdateCamera(RendererState *renderer, CameraInput input) {
+    renderer->cameraYaw -= input.orbitYaw * kOrbitSensitivity;
+    renderer->cameraPitch =
+        Clamp(renderer->cameraPitch + input.orbitPitch * kOrbitSensitivity, -kMaxCameraPitch, kMaxCameraPitch);
+    renderer->cameraDistance =
+        Clamp(renderer->cameraDistance * (1.0f - input.zoomDelta), kMinCameraDistance, kMaxCameraDistance);
+
+    // Screen-space right/up axes of the current orbit camera, derived
+    // algebraically from yaw/pitch rather than re-deriving them from a
+    // second Mat4LookAt call.
+    Vec3 right = {cosf(renderer->cameraYaw), 0.0f, -sinf(renderer->cameraYaw)};
+    Vec3 up = {
+        -sinf(renderer->cameraPitch) * sinf(renderer->cameraYaw),
+        cosf(renderer->cameraPitch),
+        -sinf(renderer->cameraPitch) * cosf(renderer->cameraYaw),
+    };
+
+    float panScale = kPanSensitivity * renderer->cameraDistance;
+    renderer->cameraTarget.x += (-right.x * input.panX + up.x * input.panY) * panScale;
+    renderer->cameraTarget.y += (-right.y * input.panX + up.y * input.panY) * panScale;
+    renderer->cameraTarget.z += (-right.z * input.panX + up.z * input.panY) * panScale;
+
+    Mat4 view = OrbitCameraViewMatrix(renderer->cameraTarget, renderer->cameraDistance, renderer->cameraYaw,
+                                       renderer->cameraPitch);
+    renderer->viewProjection = Mat4Multiply(renderer->projection, view);
 }
 
 void RendererRender(RendererState *renderer, const GameState *game, RenderTarget target) {
