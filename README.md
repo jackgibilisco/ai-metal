@@ -21,8 +21,13 @@ Total cost: $33.62
 # Build Instructions
 
 Clone the repository
+
 `git clone https://github.com/jackgibilisco/ai-metal.git`
+
 Enter the project directory
+
 `cd ai-metal`
+
 Build and run the program
+
 `make run`
