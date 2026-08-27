@@ -17,3 +17,12 @@ For testing purposes, spawn 3 cubes on the first frame and rotate them every fra
 So far I've written no code by hand for this project, and I intend to keep it that way as long as I can.
 Total token count: 95.74M
 Total cost: $33.62
+
+# Build Instructions
+
+Clone the repository
+`git clone https://github.com/jackgibilisco/ai-metal.git`
+Enter the project directory
+`cd ai-metal`
+Build and run the program
+`make run`
