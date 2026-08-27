@@ -108,6 +108,7 @@ constexpr float kMouseWheelZoom = 0.05f;
 // owns; drawInMTKView: feeds it one sample per frame. hitTest: returns nil so
 // camera drags pass straight through to the MTKView underneath.
 @interface DebugHudView : NSView
+@property(nonatomic) float targetFrameMs; // one display refresh; sets the graph scale
 - (void)pushFrameTime:(float)deltaSeconds;
 @end
 
@@ -135,24 +136,25 @@ constexpr float kMouseWheelZoom = 0.05f;
 }
 
 - (void)drawGraphInRect:(NSRect)rect {
-    const float maxMs = 50.0f;
+    float targetMs = _targetFrameMs > 0.0f ? _targetFrameMs : 1000.0f / 60.0f;
+    float maxMs = targetMs * 3.0f;
     CGFloat bottom = rect.origin.y + rect.size.height;
 
     [[NSColor colorWithWhite:1.0 alpha:0.12] set];
     NSRectFill(rect);
 
     [[NSColor colorWithWhite:1.0 alpha:0.25] set];
-    NSRectFill(NSMakeRect(rect.origin.x, bottom - rect.size.height * (1000.0f / 60.0f / maxMs),
+    NSRectFill(NSMakeRect(rect.origin.x, bottom - rect.size.height * (targetMs / maxMs),
                           rect.size.width, 1));
-    NSRectFill(NSMakeRect(rect.origin.x, bottom - rect.size.height * (1000.0f / 30.0f / maxMs),
+    NSRectFill(NSMakeRect(rect.origin.x, bottom - rect.size.height * (2.0f * targetMs / maxMs),
                           rect.size.width, 1));
 
     for (int i = 0; i < _stats.count; ++i) {
         float ms = FrameStatsSample(&_stats, i);
         CGFloat barHeight = rect.size.height * std::min(ms / maxMs, 1.0f);
         CGFloat x = rect.origin.x + rect.size.width - _stats.count + i;
-        NSColor *color = (ms <= 1000.0f / 60.0f)   ? [NSColor systemGreenColor]
-                         : (ms <= 1000.0f / 30.0f) ? [NSColor systemYellowColor]
+        NSColor *color = (ms <= targetMs)          ? [NSColor systemGreenColor]
+                         : (ms <= 2.0f * targetMs) ? [NSColor systemYellowColor]
                                                    : [NSColor systemRedColor];
         [color set];
         NSRectFill(NSMakeRect(x, bottom - barHeight, 1, barHeight));
@@ -167,8 +169,10 @@ constexpr float kMouseWheelZoom = 0.05f;
     float lowMs = FrameStatsOnePercentLowMs(&_stats);
     float lowFps = 1000.0f / std::max(lowMs, 0.001f);
 
-    NSString *text = [NSString stringWithFormat:@"FPS %.0f\navg %.2f ms\n1%% low %.0f fps  %.2f ms",
-                                                fps, avgMs, lowFps, lowMs];
+    float displayHz = _targetFrameMs > 0.0f ? 1000.0f / _targetFrameMs : 0.0f;
+    NSString *text =
+        [NSString stringWithFormat:@"FPS %.0f  (%.0f Hz)\navg %.2f ms\n1%% low %.0f fps  %.2f ms",
+                                   fps, displayHz, avgMs, lowFps, lowMs];
     NSDictionary *attributes = @{
         NSFontAttributeName : [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightMedium],
         NSForegroundColorAttributeName : [NSColor whiteColor],
@@ -250,7 +254,7 @@ constexpr float kMouseWheelZoom = 0.05f;
 
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate> {
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate> {
     Arena _arena;
     void *_arenaMemory;
 }
@@ -301,10 +305,31 @@ constexpr float kMouseWheelZoom = 0.05f;
     self.viewDelegate.hudView = self.hudView;
     self.view.delegate = self.viewDelegate;
 
+    self.window.delegate = self;
     [self.window setContentView:self.view];
     [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:self.view];
     [NSApp activateIgnoringOtherApps:YES];
+
+    [self matchDisplayRefreshRate];
+}
+
+// MTKView.preferredFramesPerSecond defaults to 60; drive it at whatever the
+// window's current display actually runs at instead, and re-apply when the
+// window is dragged to a monitor with a different refresh rate.
+- (void)matchDisplayRefreshRate {
+    NSScreen *screen = self.window.screen ?: [NSScreen mainScreen];
+    NSInteger framesPerSecond = screen.maximumFramesPerSecond;
+    if (framesPerSecond <= 0) {
+        framesPerSecond = 60;
+    }
+    self.view.preferredFramesPerSecond = framesPerSecond;
+    self.hudView.targetFrameMs = 1000.0f / (float)framesPerSecond;
+}
+
+- (void)windowDidChangeScreen:(NSNotification *)notification {
+    (void)notification;
+    [self matchDisplayRefreshRate];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {

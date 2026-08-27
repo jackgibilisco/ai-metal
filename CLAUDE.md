@@ -89,7 +89,9 @@ Three layers, each with a different portability contract:
   from a `FrameStats` (`src/frame_stats.h`, header-only pure C++) fed one
   `deltaTime` sample per frame. A future second platform (e.g. iOS) would
   add a new file at this layer only; `game.*` and `renderer_metal.*` are
-  unchanged.
+  unchanged. It also drives the `MTKView` at the window's display refresh
+  rate (`NSScreen.maximumFramesPerSecond`, re-applied on
+  `windowDidChangeScreen:`) rather than `MTKView`'s 60 fps default.
 
 `src/math3d.h` is header-only, pure-C++ `Vec3`/`Mat4` math (column-major,
 matching Metal Shading Language's `float4x4` layout byte-for-byte so CPU

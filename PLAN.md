@@ -305,14 +305,22 @@ building a glyph atlas and quad batcher in the renderer. The renderer and
 - `DebugHudView : NSView` in `platform_macos.mm` — owns a `FrameStats`,
   `pushFrameTime:` is called once per frame from `drawInMTKView:` and marks
   the view dirty at ~15 Hz. `drawRect:` draws, in the top-left corner: the
-  text block (`FPS` from the mean of the last 20 frames; `avg` over the
-  full buffer; `1% low` shown as both fps and ms) over a translucent panel,
-  then the graph — one 1px column per sample, most recent at the right,
-  fixed 0–50 ms scale, green/yellow/red under 60/30 fps, with 60 and 30 fps
-  guide lines. `hitTest:` returns nil so camera drags pass through.
+  text block (`FPS` from the mean of the last 20 frames plus the display's
+  refresh rate; `avg` over the full buffer; `1% low` shown as both fps and
+  ms) over a translucent panel, then the graph — one 1px column per sample,
+  most recent at the right, vertical scale 0 to 3x the display's frame time,
+  green/yellow/red at 1x/2x that time, with guide lines at 1x and 2x.
+  `hitTest:` returns nil so camera drags pass through.
 - The view is a full-size subview of the `MTKView`, `hidden = YES` at
   startup, toggled by the `F3` key (`AppMetalView.keyDown:` matches virtual
   keyCode 99 -> `pendingToggleHud`, flipped in `drawInMTKView:`).
+
+### Refresh rate
+`MTKView.preferredFramesPerSecond` defaults to 60. `AppDelegate` sets it
+from `NSScreen.maximumFramesPerSecond` for the window's current display
+(`matchDisplayRefreshRate`, also called from `windowDidChangeScreen:` so a
+drag to a different-rate monitor re-applies it), and passes the matching
+per-frame millisecond target to the HUD for its graph scale.
 
 ### Known limitations
 - `F3` only reaches the app when the system keyboard setting "Use F1, F2,
