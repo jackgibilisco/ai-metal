@@ -26,7 +26,9 @@ There is no test suite; verification is running the binary and confirming 3
 distinct, independently-rotating cubes render without a crash or Metal
 validation error in the console output. The `o` key cycles the ambient-
 occlusion debug view (normal / raw AO buffer / AO disabled); the `f` key
-toggles the FXAA post pass; `F3` toggles the frame-timing debug HUD.
+toggles the FXAA post pass; `F3` toggles the frame-timing debug HUD (which
+also shows per-pass GPU time); ⌃⌘F (View menu) toggles borderless
+fullscreen.
 
 ## Architecture
 
@@ -36,9 +38,9 @@ never freed — the OS reclaims it on process exit. `ArenaPush`/`ArenaPushStruct
 `ArenaPushArray` are the only ways *arena* memory is claimed, and they are
 only called during `Init`. `FrameUpdate` and `FrameRender` never touch the
 arena. The one thing (re)allocated after `Init` is the renderer's set of
-screen-sized Metal textures (the SSAO g-buffer/AO/blur targets), rebuilt by
-`FrameResize` -> `RendererResize` when the drawable size changes — those are
-Metal allocations, not arena pushes.
+screen-sized Metal textures (the g-buffer, depth, half-res AO, and lit-color
+targets), rebuilt by `FrameResize` -> `RendererResize` when the drawable
+size changes — those are Metal allocations, not arena pushes.
 
 The public API the platform layer drives is exactly three functions
 (`src/app.h`):
@@ -64,8 +66,9 @@ Three layers, each with a different portability contract:
   simulation/gameplay rather than rendering.
 - **`src/renderer_metal.h`/`.mm`** — Metal-specific but OS-agnostic: it never
   touches AppKit/UIKit, only the Metal API. Owns `RendererState` (device, the
-  five pipelines, depth state, vertex/index/uniform buffers, the screen-sized
-  SSAO targets + lit-color target, the AO sample kernel + noise texture,
+  four pipelines — geometry, AO, lighting, FXAA — depth state,
+  vertex/index/uniform buffers, the screen-sized targets + lit-color target,
+  the AO sample kernel + noise texture, per-pass GPU timestamp sample buffer,
   orbit-camera state, the AO debug mode, the FXAA on/off flag), cube/plane
   mesh data, the embedded shader source, `RendererResize` (rebuilds the
   projection and the screen targets for a new drawable size),
@@ -74,12 +77,16 @@ Three layers, each with a different portability contract:
   toggle — to the camera), and `RendererRender`, which encodes one frame from
   a `RenderTarget` (command buffer + drawable) handed in by the platform
   layer. `RendererRender` runs a small deferred pipeline: geometry pass ->
-  view-space position/normal g-buffer, then full-screen SSAO, box-blur, and
-  lighting passes, then an optional FXAA pass; the last pass run writes the
-  drawable. See PLAN.md for the SSAO and FXAA detail.
+  a single g-buffer (RGBA16F: xyz = view-space normal, w = view-space Z, from
+  which view-space X/Y are reconstructed), then a full-screen half-res SSAO
+  pass, then a lighting pass that folds in the 4x4 AO box blur, then an
+  optional FXAA pass; the last pass run writes the drawable.
+  `RendererLastFrameTimings` exposes the per-pass GPU time for the F3 HUD.
+  See PLAN.md for the SSAO and FXAA detail.
 - **`src/platform_macos.mm`** — the only file allowed to touch AppKit. Owns
-  the `NSWindow`, the `MTKView` (+ its delegate, which drives `FrameUpdate`
-  then `FrameRender` on every `drawInMTKView:`), the arena allocation, and
+  the `NSWindow`, the `MTKView` (+ its delegate, whose `renderIntoDrawable:`
+  drives `FrameUpdate` then `FrameRender` once per `CAMetalDisplayLink`
+  callback), the arena allocation, and
   reading trackpad/mouse `NSEvent`s (`scrollWheel:`/`magnifyWithEvent:`/
   `rightMouseDragged:`/`otherMouseDragged:`) and the `o`/`f`/`F3` keys
   (`keyDown:`) on an `AppMetalView` subclass into the `CameraInput`
@@ -89,9 +96,39 @@ Three layers, each with a different portability contract:
   from a `FrameStats` (`src/frame_stats.h`, header-only pure C++) fed one
   `deltaTime` sample per frame. A future second platform (e.g. iOS) would
   add a new file at this layer only; `game.*` and `renderer_metal.*` are
-  unchanged. It also drives the `MTKView` at the window's display refresh
-  rate (`NSScreen.maximumFramesPerSecond`, re-applied on
-  `windowDidChangeScreen:`) rather than `MTKView`'s 60 fps default.
+  unchanged. `MTKView`'s built-in draw loop is left paused
+  (`paused = YES`, `enableSetNeedsDisplay = NO`) — it caps at 120 Hz on
+  macOS, and so does an `NSView` `CADisplayLink`. Frames are driven instead
+  by a `CAMetalDisplayLink` on the view's `CAMetalLayer`, whose
+  `metalDisplayLink:needsUpdate:` delegate callback hands a fresh drawable
+  to `AppViewDelegate.renderIntoDrawable:` (which does the `FrameUpdate` +
+  `FrameRender` the old `drawInMTKView:` used to). Its
+  `preferredFrameRateRange` is pinned to `NSScreen.maximumFramesPerSecond`
+  (re-applied from `matchDisplayRefreshRate` on `windowDidChangeScreen:`),
+  so a 240 Hz display renders at 240 Hz. The `MTKView` is retained only as
+  a preconfigured `CAMetalLayer` host and for its
+  `drawableSizeWillChange:` -> `FrameResize` hook. Fullscreen is *not*
+  AppKit's Spaces fullscreen (it throttles the `CAMetalDisplayLink` back to
+  120 Hz); the window disables it (`NSWindowCollectionBehaviorFullScreenNone`)
+  and fullscreen is instead a borderless screen-sized window
+  (`AppDelegate.toggleBorderlessFullscreen`), which keeps the uncapped
+  windowed compositor path. It is reached three ways: the View menu's
+  "Toggle Full Screen" (Cmd-F) and any `-toggleFullScreen:` (routed through
+  `AppMetalView`'s override), the green zoom button (`windowShouldZoom:`
+  returns NO after toggling), and Escape (only while already fullscreen,
+  since there is no title bar to click). `AppWindow` overrides
+  `canBecomeKeyWindow`/`canBecomeMainWindow` so the borderless window still
+  takes keyboard input. Because the paused `MTKView` no longer syncs its
+  `CAMetalLayer.drawableSize`, `AppViewDelegate.resizeToDrawableSize:` sets
+  it explicitly (from `mtkView:drawableSizeWillChange:` and after the
+  fullscreen toggle) so fullscreen renders at true backing resolution, not
+  an upscaled stale size. The borderless window is sized to *overhang* the
+  screen by 1px (`NSInsetRect(screen.frame, -1, -1)`): covering the display
+  exactly triggers macOS's fullscreen bypass / direct scanout, which
+  double-buffers and pins the frame rate to half the refresh (120 Hz on a
+  240 Hz panel); the 1px overhang keeps the normal compositor path and is
+  clipped off-screen. With the trimmed pipeline, fullscreen at a 5K backing
+  runs ~2 ms GPU / 240 fps on an M2 Pro.
 
 `src/math3d.h` is header-only, pure-C++ `Vec3`/`Mat4` math (column-major,
 matching Metal Shading Language's `float4x4` layout byte-for-byte so CPU

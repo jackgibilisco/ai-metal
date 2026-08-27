@@ -30,9 +30,22 @@ struct CameraInput {
     bool toggleFxaa;     // one keypress: enable/disable the FXAA post pass
 };
 
+// GPU time in milliseconds for each pass of the last completed frame, for
+// the F3 HUD. A pass that didn't run that frame reads 0. Per-pass values
+// assume Apple-silicon nanosecond timestamps; total is measured
+// independently from the command buffer's GPU start/end.
+struct RendererPassTimings {
+    float geometryMs;
+    float aoMs;
+    float lightingMs;
+    float fxaaMs;
+    float totalMs;
+};
+
 RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
                              MTLPixelFormat colorFormat, MTLPixelFormat depthFormat,
                              float drawableWidth, float drawableHeight);
 void RendererResize(RendererState *renderer, float drawableWidth, float drawableHeight);
 void RendererUpdateCamera(RendererState *renderer, CameraInput input);
 void RendererRender(RendererState *renderer, const GameState *game, RenderTarget target);
+RendererPassTimings RendererLastFrameTimings(const RendererState *renderer);

@@ -37,6 +37,11 @@ void FrameResize(Arena *arena, float drawableWidth, float drawableHeight) {
     RendererResize(appState->renderer, drawableWidth, drawableHeight);
 }
 
+RendererPassTimings FrameGpuTimings(Arena *arena) {
+    AppState *appState = (AppState *)arena->base;
+    return RendererLastFrameTimings(appState->renderer);
+}
+
 bool ImportBlendFile(Arena *arena, const char *filepath) {
     AppState *appState = (AppState *)arena->base;
     return GameImportBlendFile(appState->game, filepath);

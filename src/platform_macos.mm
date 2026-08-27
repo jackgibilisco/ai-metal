@@ -3,6 +3,8 @@
 
 #import <Cocoa/Cocoa.h>
 #import <MetalKit/MetalKit.h>
+#import <QuartzCore/QuartzCore.h>
+#import <QuartzCore/CAMetalDisplayLink.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include "app.h"
@@ -20,11 +22,25 @@ constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float;
 constexpr float kMouseWheelZoom = 0.05f;
 } // namespace
 
+// A borderless window can't become key by default, which would kill keyboard
+// input in borderless fullscreen; force it.
+@interface AppWindow : NSWindow
+@end
+
+@implementation AppWindow
+- (BOOL)canBecomeKeyWindow {
+    return YES;
+}
+- (BOOL)canBecomeMainWindow {
+    return YES;
+}
+@end
+
 // Trackpad gestures (two-finger drag, pinch) and mouse events (right-drag,
 // middle-drag, wheel) both land here as NSEvents, hit-tested to whichever view
 // is under the cursor — they don't require first-responder status the way key
 // events do. Deltas are just accumulated per frame and handed to the renderer
-// in drawInMTKView:, which resets them.
+// in renderIntoDrawable:, which resets them.
 @interface AppMetalView : MTKView
 @property(nonatomic) float pendingPanX;
 @property(nonatomic) float pendingPanY;
@@ -34,12 +50,24 @@ constexpr float kMouseWheelZoom = 0.05f;
 @property(nonatomic) BOOL pendingCycleDebug;
 @property(nonatomic) BOOL pendingToggleFxaa;
 @property(nonatomic) BOOL pendingToggleHud;
+@property(nonatomic) BOOL inFullscreen; // kept in sync by AppDelegate
+@property(nonatomic, copy) void (^onToggleFullscreen)(void);
 @end
 
 @implementation AppMetalView
 
 - (BOOL)acceptsFirstResponder {
     return YES;
+}
+
+// Intercepts the View menu's Cmd-F item and any programmatic -toggleFullScreen:,
+// replacing AppKit's Spaces fullscreen (which throttles CAMetalDisplayLink to
+// 120 Hz) with a borderless screen-sized window.
+- (void)toggleFullScreen:(id)sender {
+    (void)sender;
+    if (self.onToggleFullscreen) {
+        self.onToggleFullscreen();
+    }
 }
 
 - (void)keyDown:(NSEvent *)event {
@@ -53,6 +81,10 @@ constexpr float kMouseWheelZoom = 0.05f;
     }
     if (event.keyCode == 99) { // F3
         self.pendingToggleHud = YES;
+        return;
+    }
+    if (event.keyCode == 53 && self.inFullscreen && self.onToggleFullscreen) { // Escape
+        self.onToggleFullscreen();
         return;
     }
     [super keyDown:event];
@@ -105,10 +137,11 @@ constexpr float kMouseWheelZoom = 0.05f;
 
 // A transparent overlay pinned over the whole content view. It draws a
 // frame-time readout and graph in its top-left corner from a FrameStats it
-// owns; drawInMTKView: feeds it one sample per frame. hitTest: returns nil so
+// owns; renderIntoDrawable: feeds it one sample per frame. hitTest: returns nil so
 // camera drags pass straight through to the MTKView underneath.
 @interface DebugHudView : NSView
 @property(nonatomic) float targetFrameMs; // one display refresh; sets the graph scale
+@property(nonatomic) RendererPassTimings passTimings; // last frame's per-pass GPU time
 - (void)pushFrameTime:(float)deltaSeconds;
 @end
 
@@ -170,9 +203,12 @@ constexpr float kMouseWheelZoom = 0.05f;
     float lowFps = 1000.0f / std::max(lowMs, 0.001f);
 
     float displayHz = _targetFrameMs > 0.0f ? 1000.0f / _targetFrameMs : 0.0f;
-    NSString *text =
-        [NSString stringWithFormat:@"FPS %.0f  (%.0f Hz)\navg %.2f ms\n1%% low %.0f fps  %.2f ms",
-                                   fps, displayHz, avgMs, lowFps, lowMs];
+    RendererPassTimings gpu = _passTimings;
+    NSString *text = [NSString
+        stringWithFormat:@"FPS %.0f  (%.0f Hz)\navg %.2f ms\n1%% low %.0f fps  %.2f ms\n"
+                          "GPU %.2f ms\n geo %.2f  ao %.2f  lit %.2f  fxaa %.2f",
+                         fps, displayHz, avgMs, lowFps, lowMs, gpu.totalMs, gpu.geometryMs,
+                         gpu.aoMs, gpu.lightingMs, gpu.fxaaMs];
     NSDictionary *attributes = @{
         NSFontAttributeName : [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightMedium],
         NSForegroundColorAttributeName : [NSColor whiteColor],
@@ -193,26 +229,46 @@ constexpr float kMouseWheelZoom = 0.05f;
 
 @end
 
+// MTKView is kept only as a configured CAMetalLayer host and resize hook; its
+// own draw loop is paused (it caps at 120 Hz on macOS). Frames are driven by
+// a CAMetalDisplayLink in AppDelegate, which calls renderIntoDrawable: with a
+// drawable from the layer's real display refresh.
 @interface AppViewDelegate : NSObject <MTKViewDelegate>
 @property(nonatomic) Arena *arena;
 @property(nonatomic) id<MTLCommandQueue> commandQueue;
 @property(nonatomic) CFTimeInterval lastTime;
 @property(nonatomic) DebugHudView *hudView;
+@property(nonatomic, weak) AppMetalView *metalView;
 @end
 
 @implementation AppViewDelegate
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
     (void)view;
+    [self resizeToDrawableSize:size];
+}
+
+// The paused MTKView no longer syncs its CAMetalLayer's drawableSize on its
+// own, and CAMetalDisplayLink pulls drawables straight from that layer, so
+// set it here (in backing pixels) alongside the renderer's screen targets.
+- (void)resizeToDrawableSize:(CGSize)size {
+    if (size.width < 1.0 || size.height < 1.0) {
+        return;
+    }
+    ((CAMetalLayer *)self.metalView.layer).drawableSize = size;
     FrameResize(self.arena, (float)size.width, (float)size.height);
 }
 
 - (void)drawInMTKView:(MTKView *)view {
+    (void)view;
+}
+
+- (void)renderIntoDrawable:(id<CAMetalDrawable>)drawable {
     CFTimeInterval now = CACurrentMediaTime();
     float deltaTime = (self.lastTime == 0) ? 0.0f : (float)(now - self.lastTime);
     self.lastTime = now;
 
-    AppMetalView *metalView = (AppMetalView *)view;
+    AppMetalView *metalView = self.metalView;
     CameraInput cameraInput = {
         .panX = metalView.pendingPanX,
         .panY = metalView.pendingPanY,
@@ -240,7 +296,6 @@ constexpr float kMouseWheelZoom = 0.05f;
 
     FrameUpdate(self.arena, deltaTime, cameraInput);
 
-    id<CAMetalDrawable> drawable = view.currentDrawable;
     if (drawable == nil) {
         return;
     }
@@ -250,11 +305,16 @@ constexpr float kMouseWheelZoom = 0.05f;
     target.drawable = drawable;
 
     FrameRender(self.arena, target);
+
+    if (!self.hudView.hidden) {
+        self.hudView.passTimings = FrameGpuTimings(self.arena);
+    }
 }
 
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate> {
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate,
+                                   CAMetalDisplayLinkDelegate> {
     Arena _arena;
     void *_arenaMemory;
 }
@@ -262,6 +322,10 @@ constexpr float kMouseWheelZoom = 0.05f;
 @property(nonatomic) AppMetalView *view;
 @property(nonatomic) DebugHudView *hudView;
 @property(nonatomic) AppViewDelegate *viewDelegate;
+@property(nonatomic) CAMetalDisplayLink *metalDisplayLink;
+@property(nonatomic) BOOL borderlessFullscreen;
+@property(nonatomic) NSRect windowedFrame;
+@property(nonatomic) NSWindowStyleMask windowedStyleMask;
 @end
 
 @implementation AppDelegate
@@ -278,12 +342,16 @@ constexpr float kMouseWheelZoom = 0.05f;
     NSRect frame = NSMakeRect(0, 0, kWindowWidth, kWindowHeight);
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                   NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
-    self.window = [[NSWindow alloc] initWithContentRect:frame
+    self.window = [[AppWindow alloc] initWithContentRect:frame
                                                styleMask:styleMask
                                                  backing:NSBackingStoreBuffered
                                                    defer:NO];
     [self.window setTitle:@"Renderer"];
     [self.window center];
+    // AppKit's own fullscreen throttles CAMetalDisplayLink to 120 Hz; disable
+    // it so the green button zooms and our borderless fullscreen is the only
+    // fullscreen path.
+    self.window.collectionBehavior = NSWindowCollectionBehaviorFullScreenNone;
 
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
 
@@ -303,7 +371,21 @@ constexpr float kMouseWheelZoom = 0.05f;
     self.viewDelegate.arena = &_arena;
     self.viewDelegate.commandQueue = [device newCommandQueue];
     self.viewDelegate.hudView = self.hudView;
+    self.viewDelegate.metalView = self.view;
     self.view.delegate = self.viewDelegate;
+
+    __weak AppDelegate *weakSelf = self;
+    self.view.onToggleFullscreen = ^{
+        [weakSelf toggleBorderlessFullscreen];
+    };
+
+    // MTKView's own draw loop tops out at 120 Hz on macOS, and so does an
+    // NSView CADisplayLink. Pause the view and drive frames from a
+    // CAMetalDisplayLink, which delivers drawables at the layer's true
+    // display refresh (240 Hz here). Created after the view is in a window
+    // so its layer is sized and on the right screen.
+    self.view.paused = YES;
+    self.view.enableSetNeedsDisplay = NO;
 
     self.window.delegate = self;
     [self.window setContentView:self.view];
@@ -311,19 +393,72 @@ constexpr float kMouseWheelZoom = 0.05f;
     [self.window makeFirstResponder:self.view];
     [NSApp activateIgnoringOtherApps:YES];
 
+    self.metalDisplayLink =
+        [[CAMetalDisplayLink alloc] initWithMetalLayer:(CAMetalLayer *)self.view.layer];
+    self.metalDisplayLink.delegate = self;
+    [self.metalDisplayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
+
     [self matchDisplayRefreshRate];
 }
 
-// MTKView.preferredFramesPerSecond defaults to 60; drive it at whatever the
-// window's current display actually runs at instead, and re-apply when the
-// window is dragged to a monitor with a different refresh rate.
+// Borderless screen-sized "fullscreen" — keeps the windowed compositor path,
+// which runs CAMetalDisplayLink at the full display refresh, unlike AppKit's
+// Spaces fullscreen.
+- (void)toggleBorderlessFullscreen {
+    self.borderlessFullscreen = !self.borderlessFullscreen;
+    if (self.borderlessFullscreen) {
+        self.windowedFrame = self.window.frame;
+        self.windowedStyleMask = self.window.styleMask;
+        [NSApp setPresentationOptions:NSApplicationPresentationHideDock |
+                                      NSApplicationPresentationHideMenuBar];
+        [self.window setStyleMask:NSWindowStyleMaskBorderless];
+        self.window.hasShadow = NO;
+        [self.window setLevel:NSMainMenuWindowLevel + 1];
+        // Overhang the screen by 1px on every side. A borderless window that
+        // covers the display *exactly* triggers macOS's fullscreen bypass
+        // (direct scanout), which double-buffers and pins us to 120 Hz on a
+        // 240 Hz display; overhanging keeps the normal compositor path at the
+        // full refresh, and the 1px is clipped off-screen so nothing shows.
+        [self.window setFrame:NSInsetRect(self.window.screen.frame, -1.0, -1.0) display:YES];
+    } else {
+        [NSApp setPresentationOptions:NSApplicationPresentationDefault];
+        [self.window setLevel:NSNormalWindowLevel];
+        self.window.hasShadow = YES;
+        [self.window setStyleMask:self.windowedStyleMask];
+        [self.window setFrame:self.windowedFrame display:YES];
+    }
+    self.view.inFullscreen = self.borderlessFullscreen;
+    [self.window makeKeyAndOrderFront:nil];
+    [self.window makeFirstResponder:self.view];
+    [self.viewDelegate resizeToDrawableSize:[self.view convertSizeToBacking:self.view.bounds.size]];
+    [self matchDisplayRefreshRate];
+}
+
+// The green zoom button: run our borderless fullscreen instead of a normal
+// zoom (AppKit's own fullscreen is disabled via collectionBehavior).
+- (BOOL)windowShouldZoom:(NSWindow *)window toFrame:(NSRect)newFrame {
+    (void)window;
+    (void)newFrame;
+    [self toggleBorderlessFullscreen];
+    return NO;
+}
+
+- (void)metalDisplayLink:(CAMetalDisplayLink *)link needsUpdate:(CAMetalDisplayLinkUpdate *)update {
+    (void)link;
+    [self.viewDelegate renderIntoDrawable:update.drawable];
+}
+
+// Pin the display link to the window's current display refresh rate, and
+// hand the matching per-frame millisecond target to the HUD for its graph
+// scale. Re-applied when the window is dragged to a different-rate monitor.
 - (void)matchDisplayRefreshRate {
     NSScreen *screen = self.window.screen ?: [NSScreen mainScreen];
     NSInteger framesPerSecond = screen.maximumFramesPerSecond;
     if (framesPerSecond <= 0) {
         framesPerSecond = 60;
     }
-    self.view.preferredFramesPerSecond = framesPerSecond;
+    self.metalDisplayLink.preferredFrameRateRange =
+        CAFrameRateRangeMake((float)framesPerSecond, (float)framesPerSecond, (float)framesPerSecond);
     self.hudView.targetFrameMs = 1000.0f / (float)framesPerSecond;
 }
 
@@ -369,6 +504,11 @@ void InstallMainMenu(AppDelegate *delegate) {
                                                      keyEquivalent:@""];
     [menuBar addItem:fileMenuItem];
 
+    NSMenuItem *viewMenuItem = [[NSMenuItem alloc] initWithTitle:@"View"
+                                                          action:nil
+                                                   keyEquivalent:@""];
+    [menuBar addItem:viewMenuItem];
+
     [NSApp setMainMenu:menuBar];
 
     NSMenu *appMenu = [[NSMenu alloc] init];
@@ -386,6 +526,14 @@ void InstallMainMenu(AppDelegate *delegate) {
     [importItem setTarget:delegate];
     [fileMenu addItem:importItem];
     [fileMenuItem setSubmenu:fileMenu];
+
+    NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
+    NSMenuItem *fullscreenItem = [[NSMenuItem alloc] initWithTitle:@"Toggle Full Screen"
+                                                            action:@selector(toggleFullScreen:)
+                                                     keyEquivalent:@"f"];
+    fullscreenItem.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+    [viewMenu addItem:fullscreenItem];
+    [viewMenuItem setSubmenu:viewMenu];
 }
 
 } // namespace

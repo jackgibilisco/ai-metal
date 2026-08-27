@@ -15,5 +15,8 @@ void FrameUpdate(Arena *arena, float deltaTime, CameraInput cameraInput);
 void FrameRender(Arena *arena, RenderTarget target);
 void FrameResize(Arena *arena, float drawableWidth, float drawableHeight);
 
+// Per-pass GPU time of the last completed frame, for the F3 HUD.
+RendererPassTimings FrameGpuTimings(Arena *arena);
+
 // Called by the platform layer's File > Import File... menu action.
 bool ImportBlendFile(Arena *arena, const char *filepath);

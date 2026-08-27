@@ -30,7 +30,7 @@ constexpr float kMaxCameraPitch = 1.5f; // radians; keeps the view short of the 
 constexpr float kAoRadius = 0.6f;
 constexpr float kAoBias = 0.025f;
 constexpr float kAoPower = 1.6f;
-constexpr int kAoKernelSize = 32;
+constexpr int kAoKernelSize = 16;
 constexpr int kAoNoiseSize = 4;
 
 const Vec3 kLightDirectionWorld = {0.4f, 1.0f, 0.6f};
@@ -49,7 +49,7 @@ struct AoParams {
 
 struct LightParams {
     float lightDirectionView[4];
-    float misc[4]; // x: debug mode
+    float misc[4]; // x: debug mode, yz: 1/aoWidth, 1/aoHeight
 };
 
 // clang-format off
@@ -114,7 +114,7 @@ const char *kShaderSource = R"(
 #include <metal_stdlib>
 using namespace metal;
 
-constant int kKernelSize = 32;
+constant int kKernelSize = 16;
 
 struct VertexIn {
     float3 position [[attribute(0)]];
@@ -128,29 +128,32 @@ struct GeoUniforms {
 
 struct GeoVertexOut {
     float4 position [[position]];
-    float3 viewPosition;
+    float viewZ;
     float3 viewNormal;
-};
-
-struct GBufferOut {
-    float4 position [[color(0)]];
-    float4 normal [[color(1)]];
 };
 
 vertex GeoVertexOut geometry_vertex(VertexIn in [[stage_in]],
                                     constant GeoUniforms &uniforms [[buffer(1)]]) {
     GeoVertexOut out;
     out.position = uniforms.modelViewProjection * float4(in.position, 1.0);
-    out.viewPosition = (uniforms.modelView * float4(in.position, 1.0)).xyz;
+    out.viewZ = (uniforms.modelView * float4(in.position, 1.0)).z;
     out.viewNormal = (uniforms.modelView * float4(in.normal, 0.0)).xyz;
     return out;
 }
 
-fragment GBufferOut geometry_fragment(GeoVertexOut in [[stage_in]]) {
-    GBufferOut out;
-    out.position = float4(in.viewPosition, 1.0);
-    out.normal = float4(normalize(in.viewNormal), 0.0);
-    return out;
+// Single g-buffer target: xyz = view-space normal, w = view-space Z (always
+// negative for real geometry). The pass clears w to 1.0, so w >= 0.5 means
+// "background". View-space X/Y are reconstructed from uv + w + projection.
+fragment float4 geometry_fragment(GeoVertexOut in [[stage_in]]) {
+    return float4(normalize(in.viewNormal), in.viewZ);
+}
+
+float3 ReconstructViewPosition(float2 uv, float viewZ, float4x4 projection) {
+    float ndcX = uv.x * 2.0 - 1.0;
+    float ndcY = 1.0 - uv.y * 2.0;
+    float viewX = ndcX * (-viewZ) / projection[0][0];
+    float viewY = ndcY * (-viewZ) / projection[1][1];
+    return float3(viewX, viewY, viewZ);
 }
 
 struct FullscreenOut {
@@ -175,19 +178,18 @@ struct AoParams {
 };
 
 fragment float ao_fragment(FullscreenOut in [[stage_in]],
-                           texture2d<float> positionTexture [[texture(0)]],
                            texture2d<float> normalTexture [[texture(1)]],
                            texture2d<float> noiseTexture [[texture(2)]],
                            constant AoParams &params [[buffer(0)]]) {
     constexpr sampler pointSampler(address::clamp_to_edge, filter::nearest);
     constexpr sampler noiseSampler(address::repeat, filter::nearest);
 
-    float4 positionSample = positionTexture.sample(pointSampler, in.uv);
-    if (positionSample.w < 0.5) {
+    float4 normalSample = normalTexture.sample(pointSampler, in.uv);
+    if (normalSample.w >= 0.5) {
         return 1.0;
     }
-    float3 fragPosition = positionSample.xyz;
-    float3 normal = normalize(normalTexture.sample(pointSampler, in.uv).xyz);
+    float3 fragPosition = ReconstructViewPosition(in.uv, normalSample.w, params.projection);
+    float3 normal = normalize(normalSample.xyz);
 
     float2 noiseScale = params.params1.xy / float(4.0);
     float3 randomVec = normalize(noiseTexture.sample(noiseSampler, in.uv * noiseScale).xyz);
@@ -204,11 +206,11 @@ fragment float ao_fragment(FullscreenOut in [[stage_in]],
         clip.xyz /= clip.w;
         float2 sampleUV = float2(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
 
-        float4 occluderSample = positionTexture.sample(pointSampler, sampleUV);
-        if (occluderSample.w < 0.5) {
+        float4 occluderSample = normalTexture.sample(pointSampler, sampleUV);
+        if (occluderSample.w >= 0.5) {
             continue;
         }
-        float occluderZ = occluderSample.z;
+        float occluderZ = occluderSample.w;
         float rangeCheck = smoothstep(0.0, 1.0, radius / abs(fragPosition.z - occluderZ));
         occlusion += (occluderZ >= samplePosition.z + bias ? 1.0 : 0.0) * rangeCheck;
     }
@@ -216,45 +218,39 @@ fragment float ao_fragment(FullscreenOut in [[stage_in]],
     return pow(max(ao, 0.0), params.params0.z);
 }
 
-fragment float blur_fragment(FullscreenOut in [[stage_in]],
-                             texture2d<float> aoTexture [[texture(0)]],
-                             constant float2 &texelSize [[buffer(0)]]) {
-    constexpr sampler pointSampler(address::clamp_to_edge, filter::nearest);
-    float result = 0.0;
-    for (int x = -2; x < 2; ++x) {
-        for (int y = -2; y < 2; ++y) {
-            float2 offset = float2(float(x), float(y)) * texelSize;
-            result += aoTexture.sample(pointSampler, in.uv + offset).r;
-        }
-    }
-    return result / 16.0;
-}
-
 struct LightParams {
     float4 lightDirectionView;
-    float4 misc; // x: debug mode
+    float4 misc; // x: debug mode, yz: 1/aoWidth, 1/aoHeight
 };
 
 fragment float4 lighting_fragment(FullscreenOut in [[stage_in]],
-                                  texture2d<float> positionTexture [[texture(0)]],
                                   texture2d<float> normalTexture [[texture(1)]],
                                   texture2d<float> aoTexture [[texture(2)]],
                                   constant LightParams &params [[buffer(0)]]) {
     constexpr sampler pointSampler(address::clamp_to_edge, filter::nearest);
     constexpr sampler linearSampler(address::clamp_to_edge, filter::linear);
 
-    float4 positionSample = positionTexture.sample(pointSampler, in.uv);
+    float4 normalSample = normalTexture.sample(pointSampler, in.uv);
     int debugMode = int(params.misc.x);
-    float ao = aoTexture.sample(linearSampler, in.uv).r;
 
-    if (positionSample.w < 0.5) {
+    // 4x4 box blur of the half-res AO, folded in from the old separate pass.
+    float2 aoTexel = params.misc.yz;
+    float ao = 0.0;
+    for (int x = -2; x < 2; ++x) {
+        for (int y = -2; y < 2; ++y) {
+            ao += aoTexture.sample(linearSampler, in.uv + float2(x, y) * aoTexel).r;
+        }
+    }
+    ao /= 16.0;
+
+    if (normalSample.w >= 0.5) {
         return float4(0.05, 0.05, 0.08, 1.0);
     }
     if (debugMode == 1) {
         return float4(ao, ao, ao, 1.0);
     }
 
-    float3 normal = normalize(normalTexture.sample(pointSampler, in.uv).xyz);
+    float3 normal = normalize(normalSample.xyz);
     float3 lightDirection = normalize(params.lightDirectionView.xyz);
     float diffuse = max(dot(normal, lightDirection), 0.0);
     float ambientOcclusion = (debugMode == 2) ? 1.0 : ao;
@@ -363,7 +359,6 @@ struct RendererState {
 
     id<MTLRenderPipelineState> geometryPipeline;
     id<MTLRenderPipelineState> aoPipeline;
-    id<MTLRenderPipelineState> blurPipeline;
     id<MTLRenderPipelineState> lightingPipeline;
     id<MTLRenderPipelineState> fxaaPipeline;
     id<MTLDepthStencilState> depthState;
@@ -374,15 +369,19 @@ struct RendererState {
     id<MTLBuffer> planeIndexBuffer;
     id<MTLBuffer> uniformBuffer;
 
-    id<MTLTexture> gPositionTexture;
     id<MTLTexture> gNormalTexture;
     id<MTLTexture> sceneDepthTexture;
     id<MTLTexture> aoRawTexture;
-    id<MTLTexture> aoBlurTexture;
     id<MTLTexture> litColorTexture;
     id<MTLTexture> noiseTexture;
     uint32_t screenWidth;
     uint32_t screenHeight;
+    uint32_t aoWidth;
+    uint32_t aoHeight;
+
+    id<MTLCounterSampleBuffer> timestampSampleBuffer;
+    bool timingSupported;
+    float passMs[5];
 
     float aoKernel[kAoKernelSize][4];
 
@@ -402,7 +401,7 @@ struct RendererState {
 
 namespace {
 
-// The g-buffer, AO, and blur targets are the only textures whose size
+// The g-buffer, AO, and lit-color targets are the only textures whose size
 // depends on the drawable, so they are (re)created here whenever it
 // changes. Everything else the renderer owns is allocated once in
 // RendererInit.
@@ -410,7 +409,7 @@ void AllocateScreenTargets(RendererState *state, uint32_t width, uint32_t height
     if (width == 0 || height == 0) {
         return;
     }
-    if (state->gPositionTexture != nil && state->screenWidth == width &&
+    if (state->gNormalTexture != nil && state->screenWidth == width &&
         state->screenHeight == height) {
         return;
     }
@@ -424,7 +423,6 @@ void AllocateScreenTargets(RendererState *state, uint32_t width, uint32_t height
                                                       mipmapped:NO];
     floatTarget.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     floatTarget.storageMode = MTLStorageModePrivate;
-    state->gPositionTexture = [state->device newTextureWithDescriptor:floatTarget];
     state->gNormalTexture = [state->device newTextureWithDescriptor:floatTarget];
 
     MTLTextureDescriptor *depthTarget =
@@ -436,15 +434,16 @@ void AllocateScreenTargets(RendererState *state, uint32_t width, uint32_t height
     depthTarget.storageMode = MTLStorageModePrivate;
     state->sceneDepthTexture = [state->device newTextureWithDescriptor:depthTarget];
 
+    state->aoWidth = (width + 1) / 2;
+    state->aoHeight = (height + 1) / 2;
     MTLTextureDescriptor *aoTarget =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-                                                          width:width
-                                                         height:height
+                                                          width:state->aoWidth
+                                                         height:state->aoHeight
                                                       mipmapped:NO];
     aoTarget.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     aoTarget.storageMode = MTLStorageModePrivate;
     state->aoRawTexture = [state->device newTextureWithDescriptor:aoTarget];
-    state->aoBlurTexture = [state->device newTextureWithDescriptor:aoTarget];
 
     MTLTextureDescriptor *litTarget =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:state->colorFormat
@@ -501,6 +500,46 @@ id<MTLTexture> BuildNoiseTexture(id<MTLDevice> device) {
     return texture;
 }
 
+// Two timestamp samples (start/end) per pass for geometry/ao/lighting/fxaa.
+constexpr NSUInteger kTimestampSampleCount = 8;
+
+id<MTLCounterSampleBuffer> MakeTimestampSampleBuffer(id<MTLDevice> device) {
+    if (![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+        return nil;
+    }
+    id<MTLCounterSet> timestampSet = nil;
+    for (id<MTLCounterSet> set in device.counterSets) {
+        if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) {
+            timestampSet = set;
+        }
+    }
+    if (timestampSet == nil) {
+        return nil;
+    }
+
+    MTLCounterSampleBufferDescriptor *descriptor = [[MTLCounterSampleBufferDescriptor alloc] init];
+    descriptor.counterSet = timestampSet;
+    descriptor.storageMode = MTLStorageModeShared;
+    descriptor.sampleCount = kTimestampSampleCount;
+
+    NSError *error = nil;
+    id<MTLCounterSampleBuffer> buffer =
+        [device newCounterSampleBufferWithDescriptor:descriptor error:&error];
+    if (buffer == nil) {
+        NSLog(@"Timestamp sample buffer unavailable: %@", error);
+    }
+    return buffer;
+}
+
+void AttachPassTiming(RendererState *renderer, MTLRenderPassDescriptor *pass, int slot) {
+    if (!renderer->timingSupported) {
+        return;
+    }
+    pass.sampleBufferAttachments[0].sampleBuffer = renderer->timestampSampleBuffer;
+    pass.sampleBufferAttachments[0].startOfVertexSampleIndex = slot * 2;
+    pass.sampleBufferAttachments[0].endOfFragmentSampleIndex = slot * 2 + 1;
+}
+
 } // namespace
 
 RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
@@ -551,7 +590,6 @@ RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
     geometryDescriptor.fragmentFunction = [library newFunctionWithName:@"geometry_fragment"];
     geometryDescriptor.vertexDescriptor = vertexDescriptor;
     geometryDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
-    geometryDescriptor.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
     geometryDescriptor.depthAttachmentPixelFormat = depthFormat;
 
     NSError *geometryError = nil;
@@ -563,7 +601,6 @@ RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
     }
 
     state->aoPipeline = MakeFullscreenPipeline(device, library, @"ao_fragment", MTLPixelFormatR8Unorm);
-    state->blurPipeline = MakeFullscreenPipeline(device, library, @"blur_fragment", MTLPixelFormatR8Unorm);
     state->lightingPipeline = MakeFullscreenPipeline(device, library, @"lighting_fragment", colorFormat);
     state->fxaaPipeline = MakeFullscreenPipeline(device, library, @"fxaa_fragment", colorFormat);
 
@@ -574,6 +611,8 @@ RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
 
     BuildAoKernel(state);
     state->noiseTexture = BuildNoiseTexture(device);
+    state->timestampSampleBuffer = MakeTimestampSampleBuffer(device);
+    state->timingSupported = state->timestampSampleBuffer != nil;
 
     // Derive the initial orbit parameters from the original fixed eye/target
     // so the starting view is unchanged from before camera controls existed.
@@ -644,18 +683,16 @@ namespace {
 
 void EncodeGeometryPass(RendererState *renderer, const GameState *game, id<MTLCommandBuffer> commandBuffer) {
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = renderer->gPositionTexture;
+    pass.colorAttachments[0].texture = renderer->gNormalTexture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+    // w = 1.0 marks "background"; real geometry writes its negative view-space Z.
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    pass.colorAttachments[1].texture = renderer->gNormalTexture;
-    pass.colorAttachments[1].loadAction = MTLLoadActionClear;
-    pass.colorAttachments[1].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
-    pass.colorAttachments[1].storeAction = MTLStoreActionStore;
     pass.depthAttachment.texture = renderer->sceneDepthTexture;
     pass.depthAttachment.loadAction = MTLLoadActionClear;
     pass.depthAttachment.clearDepth = 1.0;
     pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+    AttachPassTiming(renderer, pass, 0);
 
     id<MTLRenderCommandEncoder> encoder =
         [commandBuffer renderCommandEncoderWithDescriptor:pass];
@@ -707,35 +744,18 @@ void EncodeAoPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer) {
     params.params0[1] = kAoBias;
     params.params0[2] = kAoPower;
     params.params0[3] = 0.0f;
-    params.params1[0] = (float)renderer->screenWidth;
-    params.params1[1] = (float)renderer->screenHeight;
+    params.params1[0] = (float)renderer->aoWidth;
+    params.params1[1] = (float)renderer->aoHeight;
     params.params1[2] = 0.0f;
     params.params1[3] = 0.0f;
+    AttachPassTiming(renderer, pass, 1);
 
     id<MTLRenderCommandEncoder> encoder =
         [commandBuffer renderCommandEncoderWithDescriptor:pass];
     [encoder setRenderPipelineState:renderer->aoPipeline];
-    [encoder setFragmentTexture:renderer->gPositionTexture atIndex:0];
     [encoder setFragmentTexture:renderer->gNormalTexture atIndex:1];
     [encoder setFragmentTexture:renderer->noiseTexture atIndex:2];
     [encoder setFragmentBytes:&params length:sizeof(params) atIndex:0];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-    [encoder endEncoding];
-}
-
-void EncodeBlurPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer) {
-    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = renderer->aoBlurTexture;
-    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-    float texelSize[2] = {1.0f / (float)renderer->screenWidth, 1.0f / (float)renderer->screenHeight};
-
-    id<MTLRenderCommandEncoder> encoder =
-        [commandBuffer renderCommandEncoderWithDescriptor:pass];
-    [encoder setRenderPipelineState:renderer->blurPipeline];
-    [encoder setFragmentTexture:renderer->aoRawTexture atIndex:0];
-    [encoder setFragmentBytes:texelSize length:sizeof(texelSize) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
 }
@@ -754,16 +774,16 @@ void EncodeLightingPass(RendererState *renderer, id<MTLCommandBuffer> commandBuf
     params.lightDirectionView[2] = lightView.z;
     params.lightDirectionView[3] = 0.0f;
     params.misc[0] = (float)renderer->debugMode;
-    params.misc[1] = 0.0f;
-    params.misc[2] = 0.0f;
+    params.misc[1] = 1.0f / (float)renderer->aoWidth;
+    params.misc[2] = 1.0f / (float)renderer->aoHeight;
     params.misc[3] = 0.0f;
+    AttachPassTiming(renderer, pass, 2);
 
     id<MTLRenderCommandEncoder> encoder =
         [commandBuffer renderCommandEncoderWithDescriptor:pass];
     [encoder setRenderPipelineState:renderer->lightingPipeline];
-    [encoder setFragmentTexture:renderer->gPositionTexture atIndex:0];
     [encoder setFragmentTexture:renderer->gNormalTexture atIndex:1];
-    [encoder setFragmentTexture:renderer->aoBlurTexture atIndex:2];
+    [encoder setFragmentTexture:renderer->aoRawTexture atIndex:2];
     [encoder setFragmentBytes:&params length:sizeof(params) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
@@ -778,6 +798,7 @@ void EncodeFxaaPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer,
 
     float inverseScreenSize[2] = {1.0f / (float)renderer->screenWidth,
                                   1.0f / (float)renderer->screenHeight};
+    AttachPassTiming(renderer, pass, 3);
 
     id<MTLRenderCommandEncoder> encoder =
         [commandBuffer renderCommandEncoderWithDescriptor:pass];
@@ -790,18 +811,57 @@ void EncodeFxaaPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer,
 
 } // namespace
 
-void RendererRender(RendererState *renderer, const GameState *game, RenderTarget target) {
-    EncodeGeometryPass(renderer, game, target.commandBuffer);
-    EncodeAoPass(renderer, target.commandBuffer);
-    EncodeBlurPass(renderer, target.commandBuffer);
+namespace {
 
-    if (renderer->fxaaEnabled) {
+void ResolvePassTimings(RendererState *renderer, uint32_t encodedSlotMask,
+                        id<MTLCommandBuffer> commandBuffer) {
+    if (renderer->timingSupported) {
+        NSData *resolved = [renderer->timestampSampleBuffer
+            resolveCounterRange:NSMakeRange(0, kTimestampSampleCount)];
+        const MTLCounterResultTimestamp *samples =
+            (const MTLCounterResultTimestamp *)resolved.bytes;
+        for (int slot = 0; slot < 4; ++slot) {
+            MTLTimestamp start = samples[slot * 2].timestamp;
+            MTLTimestamp end = samples[slot * 2 + 1].timestamp;
+            bool valid = (encodedSlotMask & (1u << slot)) && start != MTLCounterErrorValue &&
+                         end != MTLCounterErrorValue && end >= start;
+            renderer->passMs[slot] = valid ? (float)(end - start) * 1e-6f : 0.0f;
+        }
+    }
+    renderer->passMs[4] =
+        (float)((commandBuffer.GPUEndTime - commandBuffer.GPUStartTime) * 1000.0);
+}
+
+} // namespace
+
+void RendererRender(RendererState *renderer, const GameState *game, RenderTarget target) {
+    bool aoEnabled = renderer->debugMode != 2;
+    bool fxaaEnabled = renderer->fxaaEnabled;
+
+    EncodeGeometryPass(renderer, game, target.commandBuffer);
+    if (aoEnabled) {
+        EncodeAoPass(renderer, target.commandBuffer);
+    }
+    if (fxaaEnabled) {
         EncodeLightingPass(renderer, target.commandBuffer, renderer->litColorTexture);
         EncodeFxaaPass(renderer, target.commandBuffer, target.drawable.texture);
     } else {
         EncodeLightingPass(renderer, target.commandBuffer, target.drawable.texture);
     }
 
+    uint32_t encodedSlotMask =
+        (1u << 0) | (1u << 2) | (aoEnabled ? (1u << 1) : 0u) | (fxaaEnabled ? (1u << 3) : 0u);
+    [target.commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer) {
+        ResolvePassTimings(renderer, encodedSlotMask, commandBuffer);
+    }];
+
     [target.commandBuffer presentDrawable:target.drawable];
     [target.commandBuffer commit];
+}
+
+RendererPassTimings RendererLastFrameTimings(const RendererState *renderer) {
+    return RendererPassTimings{
+        renderer->passMs[0], renderer->passMs[1], renderer->passMs[2],
+        renderer->passMs[3], renderer->passMs[4],
+    };
 }

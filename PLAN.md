@@ -316,15 +316,124 @@ building a glyph atlas and quad batcher in the renderer. The renderer and
   keyCode 99 -> `pendingToggleHud`, flipped in `drawInMTKView:`).
 
 ### Refresh rate
-`MTKView.preferredFramesPerSecond` defaults to 60. `AppDelegate` sets it
-from `NSScreen.maximumFramesPerSecond` for the window's current display
-(`matchDisplayRefreshRate`, also called from `windowDidChangeScreen:` so a
-drag to a different-rate monitor re-applies it), and passes the matching
-per-frame millisecond target to the HUD for its graph scale.
+Both `MTKView`'s built-in draw loop and an `NSView` `CADisplayLink` cap at
+120 Hz on macOS regardless of `preferredFramesPerSecond` /
+`preferredFrameRateRange` — verified on a 240 Hz display where
+`CVDisplayLink` and `NSScreen.maximumFramesPerSecond` both report 240 but
+the `NSView` `CADisplayLink` still fires only 120x/sec, even in fullscreen.
+So `AppDelegate` pauses the `MTKView` (`paused = YES`,
+`enableSetNeedsDisplay = NO`) and drives frames from a `CAMetalDisplayLink`
+built on the view's `CAMetalLayer`. Its `metalDisplayLink:needsUpdate:`
+delegate callback (on the main run loop) passes `update.drawable` to
+`AppViewDelegate.renderIntoDrawable:`, which runs `FrameUpdate` +
+`FrameRender`. `preferredFrameRateRange` is pinned to
+`NSScreen.maximumFramesPerSecond` for the window's current display
+(`matchDisplayRefreshRate`, re-applied from `windowDidChangeScreen:`); the
+same rate feeds the HUD its per-frame millisecond target. Measured ~240
+callbacks/sec on the 240 Hz display.
+
+Two macOS fullscreen quirks each halve the frame rate on a 240 Hz display,
+and both are worked around:
+
+1. AppKit's own fullscreen (green button / Spaces) throttles the
+   `CAMetalDisplayLink` to 120 Hz with no override, so it is disabled
+   (`NSWindowCollectionBehaviorFullScreenNone`). "Fullscreen" is instead a
+   borderless window (`AppDelegate.toggleBorderlessFullscreen`): swap to
+   `NSWindowStyleMaskBorderless`, dock/menu bar hidden, no shadow, and back.
+   Reached via the View menu's "Toggle Full Screen" (Cmd-F) and any
+   `-toggleFullScreen:` (caught by `AppMetalView`'s override), the green
+   zoom button (`windowShouldZoom:` toggles and returns NO), or Escape
+   (only while fullscreen). `AppWindow` overrides
+   `canBecomeKeyWindow`/`canBecomeMainWindow` (a borderless `NSWindow`
+   refuses key status by default, which would break keyboard input).
+2. A borderless window that covers the display *exactly* triggers macOS's
+   fullscreen bypass / direct scanout, which double-buffers and again pins
+   to 120 Hz. The window is therefore sized to overhang the screen by 1px
+   (`NSInsetRect(screen.frame, -1, -1)`), keeping the normal compositor
+   path; the 1px is clipped off-screen.
+
+The paused `MTKView` defers `CAMetalLayer.drawableSize` updates to a
+`-draw` that never happens, so `AppViewDelegate.resizeToDrawableSize:` sets
+the layer size explicitly — from `mtkView:drawableSizeWillChange:` and
+after the toggle — otherwise fullscreen renders at the stale windowed size
+and is upscaled (blurry). With both quirks handled and the trimmed
+pipeline, fullscreen at a 5124x2884 backing runs ~2 ms GPU / 240 fps on an
+M2 Pro.
 
 ### Known limitations
 - `F3` only reaches the app when the system keyboard setting "Use F1, F2,
   etc. keys as standard function keys" is on, or when pressed as `fn`+`F3`;
   otherwise macOS eats it for Mission Control.
-- Samples are wall-clock deltas between `drawInMTKView:` calls (CPU-side
-  present cadence), not GPU timestamp spans.
+- HUD frame-time samples are wall-clock deltas between `renderIntoDrawable:`
+  calls (CPU-side present cadence). The `F3` HUD also shows per-pass GPU
+  time from a `MTLCounterSampleBuffer` (see "SSAO performance pass").
+
+## Feature: SSAO performance pass
+
+### Problem
+In fullscreen, loading `scene1.blend` gives much worse frame times than the
+3-cube test scene at the same resolution. Cause: `ao_fragment` early-outs
+(`positionSample.w < 0.5`) on background pixels, so with 3 small cubes most
+of the screen skips the 32-sample kernel; the blend scene's ground plane
+fills the frame, so every pixel runs the full kernel (32 iterations, each a
+`projection * float4` plus two RGBA16F texture fetches) over the whole
+drawable. Object count is not the issue (10 objects vs 3). Target: 4.16 ms
+(240 Hz).
+
+### Changes
+1. Per-pass GPU timing on the F3 HUD (do first, to measure).
+   - `RendererState` gets a `MTLCounterSampleBuffer` (timestamp counter set,
+     `sampleCount` 10) and `float passMs[6]` (geometry, ao, blur, lighting,
+     fxaa, total).
+   - Each render pass descriptor gets
+     `sampleBufferAttachments[0]` set to `{startOfVertexSampleIndex: slot*2,
+     endOfFragmentSampleIndex: slot*2+1}` with fixed slots
+     geometry 0 / ao 1 / blur 2 / lighting 3 / fxaa 4.
+   - A `commandBuffer` completion handler resolves the range and fills
+     `passMs`; per-pass values assume Apple-silicon nanosecond timestamps,
+     total comes from `GPUEndTime - GPUStartTime` (unit-independent). Passes
+     not encoded this frame are forced to 0. The handler runs on a
+     background thread and writes plain floats the HUD reads on the main
+     thread — a benign race, acceptable for a debug readout.
+   - New `RendererPassTimings RendererLastFrameTimings(const RendererState*)`
+     and `FrameGpuTimings(Arena*)`; `DebugHudView` draws two extra lines.
+2. Half-resolution SSAO. `aoRawTexture` / `aoBlurTexture` allocated at
+   `(width+1)/2 x (height+1)/2`. `RendererState.aoWidth/aoHeight` track it.
+   The AO and blur passes render at that size (render pass viewport defaults
+   to the attachment size); the lighting pass already samples the AO result
+   with a linear sampler, so upscale is free. `ao_fragment`'s noise tiling
+   and `blur_fragment`'s texel size switch from screen size to AO size.
+3. AO kernel 32 -> 16 samples (`kAoKernelSize` in `renderer_metal.mm`,
+   `kKernelSize` in the shader, `AoParams.sampleOffsets` length). The blur
+   hides the reduced sample count.
+4. Skip the AO and blur passes entirely when AO is disabled (the `o`-key
+   debug mode 2); the lighting shader already forces occlusion to 1 there.
+
+### Pipeline trim (follow-up, after the fullscreen work)
+Once fullscreen ran at true 5K, the deferred passes were the cost. Two
+cuts, no visible quality change:
+5. Drop the position g-buffer. The geometry pass now writes one RGBA16F
+   target: `xyz` = view-space normal, `w` = view-space Z (negative for real
+   geometry; the pass clears `w` to 1.0 so `w >= 0.5` means background).
+   `ReconstructViewPosition(uv, viewZ, projection)` in `ao_fragment` rebuilds
+   view-space X/Y from the fullscreen-triangle uv and the projection's
+   `[0][0]`/`[1][1]` terms — no matrix inverse, no dependence on the depth
+   buffer's encoding. `lighting_fragment` only needed the background test, so
+   it just reads `normalSample.w`.
+6. Fold the 4x4 AO box blur into `lighting_fragment` (it already sampled the
+   AO texture). Removes the blur pipeline, `blur_fragment`, `aoBlurTexture`,
+   and a full-screen pass. `LightParams.misc.yz` carries `1/aoWidth`,
+   `1/aoHeight`. Timer slots renumber to geometry 0 / ao 1 / lighting 2 /
+   fxaa 3.
+
+Result: geometry writes 8 bytes/texel instead of 16, the AO loop reads the
+normal target (which it needs anyway) instead of a separate position
+target, and one full-screen pass is gone. Fullscreen 5124x2884 on an M2
+Pro: ~8.6 ms -> ~2 ms GPU. (The earlier 8.6 ms was mostly the
+fullscreen-bypass stall, not compute; see the refresh-rate section.)
+
+### Not doing (would need sign-off)
+- Moving SSAO to a compute shader with threadgroup-shared samples.
+- Per-frame ring of counter sample buffers (the current single buffer can
+  under-report per-pass times when several frames are in flight; the total
+  from `GPUStartTime`/`GPUEndTime` stays accurate).
