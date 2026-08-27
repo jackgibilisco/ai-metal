@@ -4,6 +4,7 @@ This project is mainly a way for me to experiment with my Claude setup (currentl
 I've also been playing around with how much I have to specify in the prompt vs how much it can figure out on its own.
 
 Here was the initial prompt to get a basic renderer:
+
 ```
 Start a new project here.
 Create a barebones, lightweight c-style c++ renderer that uses metal to draw cubes to the screen.
@@ -14,8 +15,11 @@ with no memory allocated while the program is running.
 FrameUpdate should be completely platform agnostic, and FrameRender should be operating system agnostic, but not rendering api agnostic.
 For testing purposes, spawn 3 cubes on the first frame and rotate them every frame in FrameUpdate.
 ```
+
 So far I've written no code by hand for this project, and I intend to keep it that way as long as I can.
+
 Total token count: 95.74M
+
 Total cost: $33.62
 
 # Build Instructions
