@@ -7,6 +7,7 @@
 
 #include "app.h"
 #include "arena.h"
+#include "frame_stats.h"
 
 namespace {
 constexpr size_t kArenaSize = 64 * 1024 * 1024;
@@ -32,6 +33,7 @@ constexpr float kMouseWheelZoom = 0.05f;
 @property(nonatomic) float pendingOrbitPitch;
 @property(nonatomic) BOOL pendingCycleDebug;
 @property(nonatomic) BOOL pendingToggleFxaa;
+@property(nonatomic) BOOL pendingToggleHud;
 @end
 
 @implementation AppMetalView
@@ -47,6 +49,10 @@ constexpr float kMouseWheelZoom = 0.05f;
     }
     if ([event.charactersIgnoringModifiers isEqualToString:@"f"]) {
         self.pendingToggleFxaa = YES;
+        return;
+    }
+    if (event.keyCode == 99) { // F3
+        self.pendingToggleHud = YES;
         return;
     }
     [super keyDown:event];
@@ -97,10 +103,97 @@ constexpr float kMouseWheelZoom = 0.05f;
 
 @end
 
+// A transparent overlay pinned over the whole content view. It draws a
+// frame-time readout and graph in its top-left corner from a FrameStats it
+// owns; drawInMTKView: feeds it one sample per frame. hitTest: returns nil so
+// camera drags pass straight through to the MTKView underneath.
+@interface DebugHudView : NSView
+- (void)pushFrameTime:(float)deltaSeconds;
+@end
+
+@implementation DebugHudView {
+    FrameStats _stats;
+    CFTimeInterval _lastRedraw;
+}
+
+- (BOOL)isFlipped {
+    return YES;
+}
+
+- (NSView *)hitTest:(NSPoint)point {
+    (void)point;
+    return nil;
+}
+
+- (void)pushFrameTime:(float)deltaSeconds {
+    FrameStatsPush(&_stats, deltaSeconds);
+    CFTimeInterval now = CACurrentMediaTime();
+    if (now - _lastRedraw > 0.066) {
+        _lastRedraw = now;
+        self.needsDisplay = YES;
+    }
+}
+
+- (void)drawGraphInRect:(NSRect)rect {
+    const float maxMs = 50.0f;
+    CGFloat bottom = rect.origin.y + rect.size.height;
+
+    [[NSColor colorWithWhite:1.0 alpha:0.12] set];
+    NSRectFill(rect);
+
+    [[NSColor colorWithWhite:1.0 alpha:0.25] set];
+    NSRectFill(NSMakeRect(rect.origin.x, bottom - rect.size.height * (1000.0f / 60.0f / maxMs),
+                          rect.size.width, 1));
+    NSRectFill(NSMakeRect(rect.origin.x, bottom - rect.size.height * (1000.0f / 30.0f / maxMs),
+                          rect.size.width, 1));
+
+    for (int i = 0; i < _stats.count; ++i) {
+        float ms = FrameStatsSample(&_stats, i);
+        CGFloat barHeight = rect.size.height * std::min(ms / maxMs, 1.0f);
+        CGFloat x = rect.origin.x + rect.size.width - _stats.count + i;
+        NSColor *color = (ms <= 1000.0f / 60.0f)   ? [NSColor systemGreenColor]
+                         : (ms <= 1000.0f / 30.0f) ? [NSColor systemYellowColor]
+                                                   : [NSColor systemRedColor];
+        [color set];
+        NSRectFill(NSMakeRect(x, bottom - barHeight, 1, barHeight));
+    }
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+
+    float fps = 1000.0f / std::max(FrameStatsMeanMs(&_stats, 20), 0.001f);
+    float avgMs = FrameStatsMeanMs(&_stats, FrameStats::kCapacity);
+    float lowMs = FrameStatsOnePercentLowMs(&_stats);
+    float lowFps = 1000.0f / std::max(lowMs, 0.001f);
+
+    NSString *text = [NSString stringWithFormat:@"FPS %.0f\navg %.2f ms\n1%% low %.0f fps  %.2f ms",
+                                                fps, avgMs, lowFps, lowMs];
+    NSDictionary *attributes = @{
+        NSFontAttributeName : [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightMedium],
+        NSForegroundColorAttributeName : [NSColor whiteColor],
+    };
+    NSSize textSize = [text sizeWithAttributes:attributes];
+
+    const CGFloat margin = 10;
+    const CGFloat graphWidth = FrameStats::kCapacity;
+    const CGFloat graphHeight = 64;
+    CGFloat panelWidth = std::max((CGFloat)textSize.width, graphWidth) + margin * 2;
+    CGFloat panelHeight = textSize.height + graphHeight + margin * 3;
+
+    [[NSColor colorWithWhite:0.0 alpha:0.55] set];
+    NSRectFill(NSMakeRect(0, 0, panelWidth, panelHeight));
+    [text drawAtPoint:NSMakePoint(margin, margin) withAttributes:attributes];
+    [self drawGraphInRect:NSMakeRect(margin, margin * 2 + textSize.height, graphWidth, graphHeight)];
+}
+
+@end
+
 @interface AppViewDelegate : NSObject <MTKViewDelegate>
 @property(nonatomic) Arena *arena;
 @property(nonatomic) id<MTLCommandQueue> commandQueue;
 @property(nonatomic) CFTimeInterval lastTime;
+@property(nonatomic) DebugHudView *hudView;
 @end
 
 @implementation AppViewDelegate
@@ -133,6 +226,14 @@ constexpr float kMouseWheelZoom = 0.05f;
     metalView.pendingCycleDebug = NO;
     metalView.pendingToggleFxaa = NO;
 
+    if (metalView.pendingToggleHud) {
+        self.hudView.hidden = !self.hudView.hidden;
+        metalView.pendingToggleHud = NO;
+    }
+    if (deltaTime > 0.0f) {
+        [self.hudView pushFrameTime:deltaTime];
+    }
+
     FrameUpdate(self.arena, deltaTime, cameraInput);
 
     id<CAMetalDrawable> drawable = view.currentDrawable;
@@ -155,6 +256,7 @@ constexpr float kMouseWheelZoom = 0.05f;
 }
 @property(nonatomic) NSWindow *window;
 @property(nonatomic) AppMetalView *view;
+@property(nonatomic) DebugHudView *hudView;
 @property(nonatomic) AppViewDelegate *viewDelegate;
 @end
 
@@ -188,9 +290,15 @@ constexpr float kMouseWheelZoom = 0.05f;
     Init(&_arena, device, self.view.colorPixelFormat, kDepthFormat, (float)drawableSize.width,
          (float)drawableSize.height);
 
+    self.hudView = [[DebugHudView alloc] initWithFrame:self.view.bounds];
+    self.hudView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.hudView.hidden = YES;
+    [self.view addSubview:self.hudView];
+
     self.viewDelegate = [[AppViewDelegate alloc] init];
     self.viewDelegate.arena = &_arena;
     self.viewDelegate.commandQueue = [device newCommandQueue];
+    self.viewDelegate.hudView = self.hudView;
     self.view.delegate = self.viewDelegate;
 
     [self.window setContentView:self.view];

@@ -281,3 +281,42 @@ blends across them.
   tuning knobs). Good enough for hard-surface cube edges.
 - Runs on the LDR lit image with no separate luma/alpha channel, so very
   dark or very bright edges antialias slightly less well.
+
+## Feature: Debug HUD (frame timing)
+
+### Problem
+There is no way to see how the renderer performs. Add an overlay showing
+current framerate, a scrolling frame-time graph, average frame time, and
+the 1% low.
+
+### Scope decision
+The HUD is an AppKit overlay, not a Metal pass. Frame time is already known
+platform-side (`drawInMTKView:` computes `deltaTime`), and text/graph
+drawing is trivial with `NSString drawAtPoint:` / `NSRectFill` versus
+building a glyph atlas and quad batcher in the renderer. The renderer and
+`app.h` API are untouched.
+
+### Pieces
+- `src/frame_stats.h` — header-only pure C++, in the spirit of `math3d.h`:
+  a fixed 240-sample ring buffer of millisecond frame times plus
+  `FrameStatsPush`, `FrameStatsMeanMs(lastN)`, and
+  `FrameStatsOnePercentLowMs` (99th-percentile frame time, i.e. worst frame
+  after setting the slowest ~1% aside).
+- `DebugHudView : NSView` in `platform_macos.mm` — owns a `FrameStats`,
+  `pushFrameTime:` is called once per frame from `drawInMTKView:` and marks
+  the view dirty at ~15 Hz. `drawRect:` draws, in the top-left corner: the
+  text block (`FPS` from the mean of the last 20 frames; `avg` over the
+  full buffer; `1% low` shown as both fps and ms) over a translucent panel,
+  then the graph — one 1px column per sample, most recent at the right,
+  fixed 0–50 ms scale, green/yellow/red under 60/30 fps, with 60 and 30 fps
+  guide lines. `hitTest:` returns nil so camera drags pass through.
+- The view is a full-size subview of the `MTKView`, `hidden = YES` at
+  startup, toggled by the `F3` key (`AppMetalView.keyDown:` matches virtual
+  keyCode 99 -> `pendingToggleHud`, flipped in `drawInMTKView:`).
+
+### Known limitations
+- `F3` only reaches the app when the system keyboard setting "Use F1, F2,
+  etc. keys as standard function keys" is on, or when pressed as `fn`+`F3`;
+  otherwise macOS eats it for Mission Control.
+- Samples are wall-clock deltas between `drawInMTKView:` calls (CPU-side
+  present cadence), not GPU timestamp spans.

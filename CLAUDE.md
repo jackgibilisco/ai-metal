@@ -26,7 +26,7 @@ There is no test suite; verification is running the binary and confirming 3
 distinct, independently-rotating cubes render without a crash or Metal
 validation error in the console output. The `o` key cycles the ambient-
 occlusion debug view (normal / raw AO buffer / AO disabled); the `f` key
-toggles the FXAA post pass.
+toggles the FXAA post pass; `F3` toggles the frame-timing debug HUD.
 
 ## Architecture
 
@@ -81,12 +81,15 @@ Three layers, each with a different portability contract:
   the `NSWindow`, the `MTKView` (+ its delegate, which drives `FrameUpdate`
   then `FrameRender` on every `drawInMTKView:`), the arena allocation, and
   reading trackpad/mouse `NSEvent`s (`scrollWheel:`/`magnifyWithEvent:`/
-  `rightMouseDragged:`/`otherMouseDragged:`) and the `o`/`f` keys
+  `rightMouseDragged:`/`otherMouseDragged:`) and the `o`/`f`/`F3` keys
   (`keyDown:`) on an `AppMetalView` subclass into the `CameraInput`
   passed to `FrameUpdate`, and forwarding `MTKView`'s
-  `drawableSizeWillChange:` to `FrameResize`. A future second platform (e.g.
-  iOS) would add a new file at this layer only; `game.*` and
-  `renderer_metal.*` are unchanged.
+  `drawableSizeWillChange:` to `FrameResize`. It also owns `DebugHudView`,
+  a pass-through `NSView` overlay that renders the `F3` frame-timing HUD
+  from a `FrameStats` (`src/frame_stats.h`, header-only pure C++) fed one
+  `deltaTime` sample per frame. A future second platform (e.g. iOS) would
+  add a new file at this layer only; `game.*` and `renderer_metal.*` are
+  unchanged.
 
 `src/math3d.h` is header-only, pure-C++ `Vec3`/`Mat4` math (column-major,
 matching Metal Shading Language's `float4x4` layout byte-for-byte so CPU
