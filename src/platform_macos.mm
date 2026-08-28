@@ -82,8 +82,14 @@ constexpr float kMouseWheelZoom = 0.05f;
     }
     NSString *chars = event.charactersIgnoringModifiers;
     unsigned int codepoint = chars.length > 0 ? [chars characterAtIndex:0] : 0;
+    NSEventModifierFlags flags = event.modifierFlags;
+    unsigned int mods = 0;
+    if (flags & NSEventModifierFlagCommand) mods |= 1u;
+    if (flags & NSEventModifierFlagShift) mods |= 2u;
+    if (flags & NSEventModifierFlagControl) mods |= 4u;
+    if (flags & NSEventModifierFlagOption) mods |= 8u;
     _pendingKeyEvents[_pendingKeyEventCount++] =
-        (KeyEvent){(int)event.keyCode, codepoint, (bool)pressed};
+        (KeyEvent){(int)event.keyCode, codepoint, mods, (bool)pressed};
 }
 
 - (int)drainKeyEventsInto:(KeyEvent *)dest max:(int)max {
@@ -106,12 +112,20 @@ constexpr float kMouseWheelZoom = 0.05f;
 }
 
 - (void)keyDown:(NSEvent *)event {
-    [self enqueueKey:event pressed:YES];
-    if ([event.charactersIgnoringModifiers isEqualToString:@"o"]) {
+    if (!event.isARepeat) {
+        [self enqueueKey:event pressed:YES];
+    }
+
+    // The bare-letter debug toggles must not also fire when a modifier is
+    // held — Cmd-F is a command shortcut (fullscreen), not the FXAA toggle.
+    bool plainKey = (event.modifierFlags &
+                     (NSEventModifierFlagCommand | NSEventModifierFlagControl |
+                      NSEventModifierFlagOption)) == 0;
+    if (plainKey && [event.charactersIgnoringModifiers isEqualToString:@"o"]) {
         self.pendingCycleDebug = YES;
         return;
     }
-    if ([event.charactersIgnoringModifiers isEqualToString:@"f"]) {
+    if (plainKey && [event.charactersIgnoringModifiers isEqualToString:@"f"]) {
         self.pendingToggleFxaa = YES;
         return;
     }
@@ -119,7 +133,7 @@ constexpr float kMouseWheelZoom = 0.05f;
         self.pendingToggleHud = YES;
         return;
     }
-    if ([event.charactersIgnoringModifiers isEqualToString:@"p"]) {
+    if (plainKey && [event.charactersIgnoringModifiers isEqualToString:@"p"]) {
         self.pendingToggleSpin = YES;
         return;
     }
@@ -691,56 +705,67 @@ static void MenuHookQuit(void *context) {
     }];
 }
 
-// Every native menu item carries its MenuAction in its tag and routes here,
-// through the same dispatch the in-app menu strip uses.
+// Every native menu item carries its CommandId in its tag and routes here,
+// through the same command table the in-app strip and keybindings use.
 - (void)dispatchMenuAction:(NSMenuItem *)sender {
     if (_arenaMemory == NULL) {
         return;
     }
-    AppDispatchMenuAction(&_arena, (MenuAction)sender.tag);
+    AppInvokeCommand(&_arena, (CommandId)sender.tag);
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     if (_arenaMemory == NULL) {
         return YES;
     }
-    if (item.tag == MenuAction_ToggleMenuBar) {
-        item.state = AppMenuState(&_arena).showMenuBar ? NSControlStateValueOn : NSControlStateValueOff;
-        return !self.borderlessFullscreen;
+    const Command *command = CommandById((CommandId)item.tag);
+    if (command == nullptr) {
+        return YES;
     }
-    return YES;
+    CommandContext ctx = AppCommandContext(&_arena);
+    if (command->isChecked != nullptr) {
+        item.state = command->isChecked(ctx) ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    return command->isEnabled == nullptr || command->isEnabled(ctx);
 }
 
 @end
 
 namespace {
 
-// Build the real menu bar from the portable model. menus[0] is shown by
-// macOS as the application menu (its title is replaced with the app name).
+// Build the real menu bar from the portable layout + command table. menus[0]
+// is shown by macOS as the application menu (its title is replaced with the
+// app name). Native items carry no keyEquivalent: the app's own keybinding
+// matcher (FrameUpdate scanning FrameInput.keyEvents) is the sole shortcut
+// handler, so shortcuts also work on a platform with no NSMenu.
 void InstallMainMenu(AppDelegate *delegate) {
-    MenuBar model = MenuBarDefault();
+    MenuBar layout = MenuBarDefault();
     NSMenu *menuBar = [[NSMenu alloc] init];
 
-    for (int i = 0; i < model.menuCount; ++i) {
+    for (int i = 0; i < layout.menuCount; ++i) {
         NSMenuItem *containerItem = [[NSMenuItem alloc] init];
         [menuBar addItem:containerItem];
 
         NSMenu *submenu =
-            [[NSMenu alloc] initWithTitle:[NSString stringWithUTF8String:model.menus[i].title]];
+            [[NSMenu alloc] initWithTitle:[NSString stringWithUTF8String:layout.menus[i].title]];
         [containerItem setSubmenu:submenu];
 
-        for (int j = 0; j < model.menus[i].itemCount; ++j) {
-            MenuItem modelItem = model.menus[i].items[j];
-            NSString *key = (modelItem.shortcut && modelItem.shortcut[0] != '\0')
-                                ? [NSString stringWithUTF8String:modelItem.shortcut]
-                                : @"";
+        for (int j = 0; j < layout.menus[i].entryCount; ++j) {
+            CommandId entry = layout.menus[i].entries[j];
+            if (entry == kMenuSeparator) {
+                [submenu addItem:[NSMenuItem separatorItem]];
+                continue;
+            }
+            const Command *command = CommandById(entry);
+            if (command == nullptr) {
+                continue;
+            }
             NSMenuItem *nsItem =
-                [[NSMenuItem alloc] initWithTitle:[NSString stringWithUTF8String:modelItem.label]
+                [[NSMenuItem alloc] initWithTitle:[NSString stringWithUTF8String:command->label]
                                           action:@selector(dispatchMenuAction:)
-                                   keyEquivalent:key];
-            nsItem.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+                                   keyEquivalent:@""];
             nsItem.target = delegate;
-            nsItem.tag = modelItem.action;
+            nsItem.tag = command->id;
             [submenu addItem:nsItem];
         }
     }

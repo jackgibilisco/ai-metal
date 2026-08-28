@@ -7,6 +7,7 @@
 struct KeyEvent {
     int keyCode;
     unsigned int codepoint; // 0 when the key produces no character
+    unsigned int mods;      // bit 0 cmd, 1 shift, 2 ctrl, 3 alt (matches ShortcutMod_*)
     bool pressed;           // true = key down, false = key up
 };
 

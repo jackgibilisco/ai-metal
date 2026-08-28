@@ -16,8 +16,18 @@ struct AppState {
     UiDemoState demo;
     MenuState menu;
     PlatformMenuHooks menuHooks;
+    bool fullscreen; // tracked from the last FrameInput, for CommandContext
     int forcedRenderFrames; // FrameUpdate reports "needs render" while this is > 0
 };
+
+CommandContext AppStateContext(AppState *appState) {
+    return CommandContext{&appState->menu, appState->menuHooks, appState->fullscreen};
+}
+
+void InvokeCommand(AppState *appState, CommandId id) {
+    CommandInvoke(id, AppStateContext(appState));
+    appState->forcedRenderFrames = 3;
+}
 
 } // namespace
 
@@ -36,6 +46,7 @@ void Init(Arena *arena, id<MTLDevice> device, MTLPixelFormat colorFormat,
 
 bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     AppState *appState = (AppState *)arena->base;
+    appState->fullscreen = input.fullscreen;
 
     if (input.toggleSpin) {
         GameToggleSpin(appState->game);
@@ -44,12 +55,25 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
 
     bool sceneAnimated = GameUpdate(appState->game, deltaTime);
 
-    UiBuildFrame(appState->ui, input, appState->menu.showMenuBar, &appState->demo);
+    UiBuildFrame(appState->ui, input, AppStateContext(appState), &appState->demo);
 
-    MenuAction menuAction = UiTakeMenuAction(appState->ui);
-    if (menuAction != MenuAction_None) {
-        MenuInvoke(menuAction, &appState->menu, appState->menuHooks);
-        appState->forcedRenderFrames = 3;
+    CommandId clicked = UiTakeCommand(appState->ui);
+    if (clicked != Command_None) {
+        InvokeCommand(appState, clicked);
+    }
+
+    for (int i = 0; i < input.keyEventCount; ++i) {
+        if (!input.keyEvents[i].pressed) {
+            continue;
+        }
+        unsigned int key = input.keyEvents[i].codepoint;
+        if (key >= 'A' && key <= 'Z') {
+            key += 32;
+        }
+        const Command *command = CommandForShortcut(key, input.keyEvents[i].mods);
+        if (command != nullptr) {
+            InvokeCommand(appState, command->id);
+        }
     }
 
     FrameInput cameraInput = input;
@@ -109,14 +133,12 @@ RendererPassTimings FrameGpuTimings(Arena *arena) {
     return RendererLastFrameTimings(appState->renderer);
 }
 
-void AppDispatchMenuAction(Arena *arena, MenuAction action) {
-    AppState *appState = (AppState *)arena->base;
-    MenuInvoke(action, &appState->menu, appState->menuHooks);
+void AppInvokeCommand(Arena *arena, CommandId id) {
+    InvokeCommand((AppState *)arena->base, id);
 }
 
-MenuState AppMenuState(Arena *arena) {
-    AppState *appState = (AppState *)arena->base;
-    return appState->menu;
+CommandContext AppCommandContext(Arena *arena) {
+    return AppStateContext((AppState *)arena->base);
 }
 
 bool ImportBlendFile(Arena *arena, const char *filepath) {

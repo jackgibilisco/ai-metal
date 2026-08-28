@@ -30,8 +30,9 @@ constexpr float kMenuBarHeight = 32.0f;
 constexpr float kMenuTitlePadX = 12.0f;
 constexpr float kMenuRowHeight = 26.0f;
 constexpr float kMenuDropdownPadX = 14.0f;
-constexpr float kMenuDropdownMinWidth = 170.0f;
-constexpr float kMenuShortcutColumn = 64.0f;
+constexpr float kMenuDropdownMinWidth = 180.0f;
+constexpr float kMenuShortcutColumn = 72.0f;
+constexpr float kMenuCheckColumn = 26.0f; // left gutter for the checkmark dot
 
 constexpr int kMaxVertices = 65536;
 
@@ -75,8 +76,9 @@ struct UiState {
     bool draggingSplitter;
 
     MenuBar menuBar;
+    CommandContext menuContext;    // set each frame; menu rendering queries it
     int openMenu;                  // -1 when closed
-    MenuAction pendingMenuAction;
+    CommandId pendingCommand;
     bool menuBarVisible;
     float menuBarHeight;           // 0 when the strip is hidden
     bool menuHasPointer;           // the strip/dropdown owns the cursor this frame
@@ -232,12 +234,30 @@ Rect MenuTitleRect(const UiState *ui, int menuIndex) {
     return {MenuTitleX(ui, menuIndex), 0.0f, w, kMenuBarHeight};
 }
 
+void ShortcutLabel(Shortcut shortcut, char *buffer, size_t size) {
+    if (shortcut.key == 0) {
+        buffer[0] = '\0';
+        return;
+    }
+    char key = (char)(shortcut.key >= 'a' && shortcut.key <= 'z' ? shortcut.key - 32 : shortcut.key);
+    snprintf(buffer, size, "%s%s%s%s%c", (shortcut.mods & ShortcutMod_Ctrl) ? "Ctrl+" : "",
+             (shortcut.mods & ShortcutMod_Alt) ? "Alt+" : "",
+             (shortcut.mods & ShortcutMod_Shift) ? "Shift+" : "",
+             (shortcut.mods & ShortcutMod_Cmd) ? "Cmd+" : "", key);
+}
+
 Rect MenuDropdownRect(const UiState *ui, int menuIndex) {
     const Menu &menu = ui->menuBar.menus[menuIndex];
     float width = kMenuDropdownMinWidth;
-    for (int i = 0; i < menu.itemCount; ++i) {
-        float w = TextWidth(menu.items[i].label) + kMenuDropdownPadX * 2.0f;
-        if (menu.items[i].shortcut && menu.items[i].shortcut[0] != '\0') {
+    for (int i = 0; i < menu.entryCount; ++i) {
+        const Command *command = CommandById(menu.entries[i]);
+        if (command == nullptr) {
+            continue;
+        }
+        float w = kMenuCheckColumn + TextWidth(command->label) + kMenuDropdownPadX * 2.0f;
+        char combo[16];
+        ShortcutLabel(command->shortcut, combo, sizeof(combo));
+        if (combo[0] != '\0') {
             w += kMenuShortcutColumn;
         }
         if (w > width) {
@@ -245,14 +265,14 @@ Rect MenuDropdownRect(const UiState *ui, int menuIndex) {
         }
     }
     return {MenuTitleX(ui, menuIndex), kMenuBarHeight, width,
-            (float)menu.itemCount * kMenuRowHeight};
+            (float)menu.entryCount * kMenuRowHeight};
 }
 
-bool MenuItemLocked(MenuAction action, bool fullscreen) {
-    return action == MenuAction_ToggleMenuBar && fullscreen;
+bool MenuEntryEnabled(const UiState *ui, const Command *command) {
+    return command->isEnabled == nullptr || command->isEnabled(ui->menuContext);
 }
 
-void MenuUpdate(UiState *ui, bool fullscreen) {
+void MenuUpdate(UiState *ui) {
     ui->menuHasPointer = false;
     if (!ui->menuBarVisible) {
         ui->openMenu = -1;
@@ -277,10 +297,12 @@ void MenuUpdate(UiState *ui, bool fullscreen) {
             ui->menuHasPointer = true;
             int row = (int)((ui->mouseY - dropdown.y) / kMenuRowHeight);
             const Menu &menu = ui->menuBar.menus[ui->openMenu];
-            if (ui->mousePressed && row >= 0 && row < menu.itemCount &&
-                !MenuItemLocked(menu.items[row].action, fullscreen)) {
-                ui->pendingMenuAction = menu.items[row].action;
-                ui->openMenu = -1;
+            if (ui->mousePressed && row >= 0 && row < menu.entryCount) {
+                const Command *command = CommandById(menu.entries[row]);
+                if (command != nullptr && MenuEntryEnabled(ui, command)) {
+                    ui->pendingCommand = command->id;
+                    ui->openMenu = -1;
+                }
             }
         } else if (ui->mousePressed) {
             ui->openMenu = -1;
@@ -292,7 +314,7 @@ void MenuUpdate(UiState *ui, bool fullscreen) {
     }
 }
 
-void MenuDraw(UiState *ui, bool fullscreen) {
+void MenuDraw(UiState *ui) {
     if (!ui->menuBarVisible) {
         return;
     }
@@ -315,23 +337,35 @@ void MenuDraw(UiState *ui, bool fullscreen) {
         return;
     }
 
-    int menuIndex = ui->openMenu;
-    const Menu &menu = ui->menuBar.menus[menuIndex];
-    Rect dropdown = MenuDropdownRect(ui, menuIndex);
+    const Menu &menu = ui->menuBar.menus[ui->openMenu];
+    Rect dropdown = MenuDropdownRect(ui, ui->openMenu);
     PushRect(ui, dropdown, kMenuDropdownBg);
 
-    for (int i = 0; i < menu.itemCount; ++i) {
-        MenuItem item = menu.items[i];
+    for (int i = 0; i < menu.entryCount; ++i) {
         Rect row = {dropdown.x, dropdown.y + (float)i * kMenuRowHeight, dropdown.w, kMenuRowHeight};
-        bool locked = MenuItemLocked(item.action, fullscreen);
-        if (!locked && PointInRect(ui->mouseX, ui->mouseY, row)) {
+        float textY = row.y + (kMenuRowHeight - kGlyphHeight * kTextScale) * 0.5f;
+
+        const Command *command = CommandById(menu.entries[i]);
+        if (command == nullptr) {
+            float lineY = row.y + kMenuRowHeight * 0.5f;
+            PushRect(ui, {row.x + kMenuDropdownPadX, lineY, row.w - kMenuDropdownPadX * 2.0f, 1.0f},
+                     kMenuTitleHot);
+            continue;
+        }
+
+        bool enabled = MenuEntryEnabled(ui, command);
+        if (enabled && PointInRect(ui->mouseX, ui->mouseY, row)) {
             PushRect(ui, row, kMenuItemHot);
         }
-        float textY = row.y + (kMenuRowHeight - kGlyphHeight * kTextScale) * 0.5f;
-        PushText(ui, row.x + kMenuDropdownPadX, textY, item.label, locked ? kTextDisabled : kTextCol);
-        if (item.shortcut && item.shortcut[0] != '\0') {
-            char combo[8];
-            snprintf(combo, sizeof(combo), "Cmd+%c", (char)(item.shortcut[0] - 32));
+        if (command->isChecked != nullptr && command->isChecked(ui->menuContext)) {
+            PushRect(ui, {row.x + 6.0f, textY + 2.0f, 6.0f, 6.0f}, kTextCol);
+        }
+        PushText(ui, row.x + kMenuCheckColumn, textY, command->label,
+                 enabled ? kTextCol : kTextDisabled);
+
+        char combo[16];
+        ShortcutLabel(command->shortcut, combo, sizeof(combo));
+        if (combo[0] != '\0') {
             PushText(ui, row.x + row.w - kMenuDropdownPadX - TextWidth(combo), textY, combo,
                      kTextShortcut);
         }
@@ -366,8 +400,9 @@ void UiHandleResize(UiState *ui, float drawableWidth, float drawableHeight) {
     }
 }
 
-void UiBuildFrame(UiState *ui, FrameInput input, bool showMenuBarPref, UiDemoState *demo) {
+void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiDemoState *demo) {
     ui->vertexCount = 0;
+    ui->menuContext = menuContext;
     ui->mouseX = input.mouseX;
     ui->mouseY = input.mouseY;
     ui->mouseDown = input.mouseLeftDown;
@@ -375,9 +410,9 @@ void UiBuildFrame(UiState *ui, FrameInput input, bool showMenuBarPref, UiDemoSta
     ui->mouseReleased = !input.mouseLeftDown && ui->prevMouseDown;
     ui->hotId = 0;
 
-    ui->menuBarVisible = input.fullscreen || showMenuBarPref;
+    ui->menuBarVisible = input.fullscreen || menuContext.menuState->showMenuBar;
     ui->menuBarHeight = ui->menuBarVisible ? kMenuBarHeight : 0.0f;
-    MenuUpdate(ui, input.fullscreen);
+    MenuUpdate(ui);
     if (ui->menuHasPointer) {
         ui->mousePressed = false;
     }
@@ -435,7 +470,7 @@ void UiBuildFrame(UiState *ui, FrameInput input, bool showMenuBarPref, UiDemoSta
     cursorY += kSliderHeight + kRowGap;
     Slider(ui, 11, {widgetX, cursorY, widgetW, kSliderHeight}, "Zoom", &demo->zoom);
 
-    MenuDraw(ui, input.fullscreen);
+    MenuDraw(ui);
 
     if (ui->mouseReleased) {
         ui->activeId = 0;
@@ -443,10 +478,10 @@ void UiBuildFrame(UiState *ui, FrameInput input, bool showMenuBarPref, UiDemoSta
     ui->prevMouseDown = ui->mouseDown;
 }
 
-MenuAction UiTakeMenuAction(UiState *ui) {
-    MenuAction action = ui->pendingMenuAction;
-    ui->pendingMenuAction = MenuAction_None;
-    return action;
+CommandId UiTakeCommand(UiState *ui) {
+    CommandId command = ui->pendingCommand;
+    ui->pendingCommand = Command_None;
+    return command;
 }
 
 bool UiWantsMouse(const UiState *ui) {

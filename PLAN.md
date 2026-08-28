@@ -718,3 +718,56 @@ the `UiVertex` uv+mode channels and the shader branch already support it.
   render as clean readable glyphs, centered/positioned as before.
 - Fullscreen: "Renderer"/"File"/"View" strip titles render in the new font;
   3 cubes + panel unaffected.
+
+## Feature: command table + portable keybindings
+
+### Problem
+The menu was a `MenuAction` enum plus a hardcoded `MenuInvoke` switch, and
+keyboard shortcuts existed only as `NSMenuItem` key-equivalents. Adding a
+command meant editing the enum, the switch, and three call sites, and a
+platform with no `NSMenu` (a Windows port) would have no working shortcuts.
+
+### Design
+- **One command table** (`menu.h`/`menu.cpp`). `Command { CommandId id;
+  const char *label; Shortcut{key,mods}; bool(*isEnabled)(ctx);
+  bool(*isChecked)(ctx); void(*invoke)(ctx); }` in a static array.
+  `CommandById`, `CommandForShortcut(key, mods)`, `CommandInvoke(id, ctx)`.
+  `CommandContext { MenuState*, PlatformMenuHooks, bool fullscreen }` is all
+  a predicate or action needs; query-only code ignores `hooks`.
+- **Menu layout stays data**: `MenuBar` of `{ title, CommandId entries[] }`
+  referencing the table, `kMenuSeparator` for dividers.
+- **The command table is the single dispatch point.** Native menu items
+  (`tag` = `CommandId`, `-dispatchMenuAction:` -> `AppInvokeCommand`), the
+  in-app strip (`UiTakeCommand` -> `InvokeCommand`), and the keybinding
+  matcher in `FrameUpdate` (scan `FrameInput.keyEvents`, `CommandForShortcut`)
+  all funnel through `CommandInvoke`.
+- **No double-firing.** Native `NSMenuItem`s carry an empty `keyEquivalent`;
+  the app's keybinding matcher is the only shortcut handler. Cmd-F / Cmd-Q
+  fire exactly once and would still work with `InstallMainMenu` removed.
+- **Modifiers captured on the KeyEvent.** `FrameInput.KeyEvent` gained
+  `unsigned int mods` (bit 0 cmd / 1 shift / 2 ctrl / 3 alt), set in
+  `keyDown:` from `event.modifierFlags`. Sampling the modifier level-state
+  at frame-assembly time misses fast synthetic chords (the Cmd-up lands
+  before the frame).
+- **In-app strip** renders label / checkmark dot / greyed-disabled straight
+  from the command's predicates; the fullscreen lock on Toggle Menu Bar is
+  just its `isEnabled` returning `!fullscreen`.
+- The bare-letter debug toggles (`o`/`f`/`p`) now require no modifier, so
+  Cmd-F is unambiguously the fullscreen command, not the FXAA toggle.
+
+### Verified
+- `make` clean, no warnings; runs under `MTL_DEBUG_LAYER=1` with no
+  validation errors in windowed / fullscreen / after each toggle.
+- Native menu: Toggle Full Screen and Toggle Menu Bar invoke correctly.
+- Cmd-F toggles fullscreen exactly once per press (both directions);
+  Cmd-Q quits cleanly. Both work with zero native key-equivalents.
+- In-app strip renders from the table in both windowed (via Toggle Menu
+  Bar) and fullscreen; strip titles appear/disappear with the command.
+  (Synthetic mouse clicks into the custom Metal view don't reach its
+  `mouseDown:`, so strip click-through is covered by the unchanged
+  MenuUpdate logic, not a scripted click.)
+
+### Not doing
+- Dynamic command registration (static table is enough).
+- Chord shortcuts / non-Cmd accelerators (the `Shortcut.mods` bitfield
+  supports them; nothing needs them yet).

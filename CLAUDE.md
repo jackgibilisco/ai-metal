@@ -57,7 +57,7 @@ FrameUpdate(arena, deltaTime, FrameInput) -> bool needsRender                  /
 FrameRender(arena, RenderTarget)                                              // only when needsRender
 FrameResize(arena, drawableW, drawableH)                                      // on drawable resize
 AppRequestRender(arena)                                                       // force the next few renders
-AppDispatchMenuAction(arena, MenuAction) / AppMenuState(arena)                 // native menu bar
+AppInvokeCommand(arena, CommandId) / AppCommandContext(arena)                  // native menu bar
 ```
 
 `FrameUpdate` returns whether anything the renderer would draw differently
@@ -72,10 +72,10 @@ UiRenderState*, UiDemoState, MenuState, PlatformMenuHooks, int
 forcedRenderFrames }` as the very first thing in
 the arena (`src/app.mm`). `FrameUpdate`/`FrameRender` recover it by
 reinterpreting `arena->base` — there are no global/static pointers holding
-program state. `FrameUpdate` builds the immediate-mode UI and routes any
-in-app menu click through the same `MenuInvoke` the native menu bar uses;
-`FrameRender` encodes the scene into the content region, then the UI overlay
-pass, then presents.
+program state. `FrameUpdate` builds the immediate-mode UI, then routes any
+in-app menu click and any matched keyboard shortcut through the same
+`CommandInvoke` the native menu bar uses; `FrameRender` encodes the scene
+into the content region, then the UI overlay pass, then presents.
 
 The portable input/menu structs live in their own dependency-free headers
 (`src/frame_input.h`, `src/menu.h`) so the pure-C++ layers pull in no Metal.
@@ -100,21 +100,25 @@ Layers, each with a different portability contract:
   renders app/game state passed in and returns intents, it does not own
   domain data. Reports the content rect the scene may use
   (`UiContentOriginX/Y`, `UiContentWidth/Height` — drawable minus panel and
-  strip), any clicked `MenuAction` (`UiTakeMenuAction`), and whether it owns
-  the pointer/keyboard this frame (`UiWantsMouse` / `UiWantsKeyboard`).
+  strip), any clicked `CommandId` (`UiTakeCommand`), and whether it owns the
+  pointer/keyboard this frame (`UiWantsMouse` / `UiWantsKeyboard`).
   `PushVertex` asserts on overflow of the 65536-vertex buffer. Text is one
   textured quad per character (`mode` 1, uv into the glyph atlas); the
   monospace 8x8 cell means `TextWidth` is just `strlen * 8 * scale`, no
   measurement pass. The atlas is built once in `ui_render_metal.mm` from the
   vendored public-domain `src/third_party/font8x8_basic.h` (ASCII 32..126);
   `ui.cpp` mirrors `kFontFirstChar`/`kFontCharCount` to place the cells.
-- **`src/menu.h`/`.cpp`** — pure C++ menu model: the `MenuAction` enum, the
-  `MenuBar` layout (`MenuBarDefault`), `MenuState` (the Show Menu Bar
-  preference), and `MenuInvoke`, which mutates `MenuState` for app-level
-  actions and calls out through a `PlatformMenuHooks` function-pointer
-  struct for the platform-only ones (import file, toggle fullscreen, quit).
-  Both the native `NSMenu` and the in-app strip are built from this model
-  and dispatch through `MenuInvoke`.
+- **`src/menu.h`/`.cpp`** — pure C++ command table: a static array of
+  `Command { id, label, Shortcut, isEnabled(ctx), isChecked(ctx), invoke(ctx) }`
+  (`CommandTable` / `CommandById` / `CommandForShortcut` / `CommandInvoke`),
+  plus a `MenuBar` layout of command-id lists per title (`MenuBarDefault`,
+  `kMenuSeparator`). `invoke` mutates `MenuState` for app-level commands
+  (Toggle Menu Bar) or calls a `PlatformMenuHooks` function pointer for the
+  platform-only ones (import file, toggle fullscreen, quit); everything a
+  predicate needs is in `CommandContext { MenuState*, PlatformMenuHooks,
+  fullscreen }`. The native `NSMenu`, the in-app strip, and the keybinding
+  matcher all resolve through this one table, so shortcuts work with no
+  native menu (a Windows port).
 - **`src/ui_render_metal.h`/`.mm`** — Metal backend for the UI: one pipeline
   (fragment branches on `mode` — solid color, or color with alpha from the
   R8 glyph atlas), the glyph atlas texture, a per-frame vertex buffer, and
@@ -164,13 +168,17 @@ Layers, each with a different portability contract:
   the matching `windowDidChangeOcclusionState:` /
   `applicationDid{Become,Resign}Active:` / `windowDid{Miniaturize,Deminiaturize}:`
   notifications, re-priming `AppViewDelegate.lastTime` and calling
-  `AppRequestRender`. `InstallMainMenu` builds the
-  `NSMenu` bar by iterating `MenuBarDefault()`; every item carries its
-  `MenuAction` in its `tag` and routes through one `-dispatchMenuAction:` ->
-  `AppDispatchMenuAction`, with `-validateMenuItem:` reflecting
-  `AppMenuState` (and disabling Toggle Menu Bar while fullscreen). The
-  platform-only actions are `PlatformMenuHooks` C trampolines handed to
-  `Init`. It also owns `DebugHudView`,
+  `AppRequestRender`. `InstallMainMenu` builds the `NSMenu` bar from the
+  `MenuBarDefault()` layout + command table; every item carries its
+  `CommandId` in its `tag`, has no `keyEquivalent` (the app's own keybinding
+  matcher in `FrameUpdate` is the sole shortcut handler, so shortcuts also
+  work with no `NSMenu`), and routes through one `-dispatchMenuAction:` ->
+  `AppInvokeCommand`; `-validateMenuItem:` reads the command's `isChecked` /
+  `isEnabled` via `AppCommandContext`. `keyDown:`/`keyUp:` record each
+  `KeyEvent` with its modifier bits captured at event time (a synthetic
+  Cmd-up can beat the frame, so sampling the modifier level-state at frame
+  assembly is unreliable). The platform-only actions are `PlatformMenuHooks`
+  C trampolines handed to `Init`. It also owns `DebugHudView`,
   a pass-through `NSView` overlay that renders the `F3` frame-timing HUD
   from a `FrameStats` (`src/frame_stats.h`, header-only pure C++) fed one
   `deltaTime` sample per frame. A future second platform (e.g. iOS or

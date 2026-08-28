@@ -33,14 +33,15 @@ struct UiState;
 UiState *UiInit(Arena *arena, float drawableWidth, float drawableHeight);
 void UiHandleResize(UiState *ui, float drawableWidth, float drawableHeight);
 
-// `showMenuBarPref` is the user's View > Toggle Menu Bar preference; the strip
-// still shows whenever FrameInput.fullscreen is set. `demo` is app-owned state
-// the sliders mutate.
-void UiBuildFrame(UiState *ui, FrameInput input, bool showMenuBarPref, UiDemoState *demo);
+// `menuContext` supplies the menu strip's Show-Menu-Bar preference (via
+// menuContext.menuState) and the fullscreen flag its command predicates read;
+// the UI never invokes commands, only reports which was clicked. `demo` is
+// app-owned state the sliders mutate.
+void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiDemoState *demo);
 
-// A menu item clicked in the in-app strip this frame, or MenuAction_None.
+// A command chosen in the in-app menu strip this frame, or Command_None.
 // Reading it clears it.
-MenuAction UiTakeMenuAction(UiState *ui);
+CommandId UiTakeCommand(UiState *ui);
 
 // True when the cursor is over UI chrome (panel, splitter, menu strip, open
 // dropdown) or a UI drag is in progress. The platform layer withholds camera

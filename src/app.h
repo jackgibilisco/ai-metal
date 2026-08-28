@@ -31,12 +31,13 @@ void AppRequestRender(Arena *arena);
 // Per-pass GPU time of the last completed frame, for the F3 HUD.
 RendererPassTimings FrameGpuTimings(Arena *arena);
 
-// Runs a menu action (from the native menu bar or the in-app strip) through
-// the shared dispatch.
-void AppDispatchMenuAction(Arena *arena, MenuAction action);
+// Runs a command (from the native menu bar or the in-app strip) through the
+// shared command table.
+void AppInvokeCommand(Arena *arena, CommandId id);
 
-// Current menu state, for the native menu bar to reflect (checkmark / enable).
-MenuState AppMenuState(Arena *arena);
+// The current CommandContext, for the native menu bar to evaluate a command's
+// isEnabled / isChecked predicates.
+CommandContext AppCommandContext(Arena *arena);
 
 // Called by the platform layer's File > Import File... menu action.
 bool ImportBlendFile(Arena *arena, const char *filepath);
