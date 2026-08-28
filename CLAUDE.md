@@ -24,9 +24,10 @@ is enough to build.
 
 There is no test suite; verification is running the binary and confirming 3
 distinct, independently-rotating cubes render without a crash or Metal
-validation error in the console output, alongside a resizable right-hand UI
-panel (draggable splitter, demo buttons/sliders) that shrinks the 3D
-viewport. The `o` key cycles the ambient-occlusion debug view (normal / raw
+validation error in the console output, alongside two dockable UI panels
+("Controls" right, "Scene" left) with title bars that shrink the 3D
+viewport; drag a title bar to tear a panel off and re-dock or float it. The
+`o` key cycles the ambient-occlusion debug view (normal / raw
 AO buffer / AO disabled); the `f` key toggles the FXAA post pass; the `p`
 key pauses/resumes the cube spin (with spin paused and no UI interaction the
 renderer stops redrawing); `F3` toggles the frame-timing debug HUD (which
@@ -46,8 +47,8 @@ only called during `Init`. `FrameUpdate` and `FrameRender` never touch the
 arena. The one thing (re)allocated after `Init` is the renderer's set of
 screen-sized Metal textures (the g-buffer, depth, half-res AO, and lit-color
 targets), rebuilt by `RendererSetContentRect` when the content region (the
-drawable minus the UI panel and menu strip) changes — those are Metal
-allocations, not arena pushes.
+drawable minus the docked UI panels and menu strip) changes — those are
+Metal allocations, not arena pushes.
 
 The public API the platform layer drives (`src/app.h`):
 
@@ -91,17 +92,24 @@ Layers, each with a different portability contract:
   is simulation/gameplay rather than rendering.
 - **`src/ui.h`/`.cpp`** — pure C++ immediate-mode UI, no Metal/AppKit. Each
   frame `UiBuildFrame` reads one `FrameInput` plus an app-owned
-  `UiDemoState*` (the values the demo sliders edit), runs the widget calls
-  (a resizable right panel with buttons/sliders behind a draggable splitter,
-  plus a top menu strip generated from `MenuBarDefault()`), and fills a flat
+  `UiDemoState*` (the values the demo sliders edit), builds the panels
+  (`UiBeginPanel`/`UiPanelButton`/`UiPanelSlider`/`UiPanelText`/`UiEndPanel`)
+  plus a top menu strip from `MenuBarDefault()`, and fills a flat
   `UiVertex` triangle list (`x, y, u, v, mode, rgba` — `mode` 0 solid, 1
-  reserved for glyphs) in screen-pixel coordinates. `UiState` is view state
-  only: splitter width, hot/active widget id, open menu, previous mouse — it
-  renders app/game state passed in and returns intents, it does not own
-  domain data. Reports the content rect the scene may use
-  (`UiContentOriginX/Y`, `UiContentWidth/Height` — drawable minus panel and
-  strip), any clicked `CommandId` (`UiTakeCommand`), and whether it owns the
-  pointer/keyboard this frame (`UiWantsMouse` / `UiWantsKeyboard`).
+  glyph) in screen-pixel coordinates. A **panel** is a titled, dockable,
+  tear-off container (buttons/sliders/labels are **controls**); each has a
+  stable id, a dock edge or a float rect, and a size, kept in `UiState`.
+  `ResolvePanelLayout` carves docked panels off the drawable (minus the menu
+  strip) and the leftover is the 3D viewport (`UiContentOriginX/Y`,
+  `UiContentWidth/Height`). `UpdatePanelInteraction` handles title-bar
+  tear-off (while a panel is dragged only a 2px outline is drawn — its
+  controls are internally suppressed — and it snaps to a screen edge to
+  re-dock) and dock-edge resize grips. `UiState` is view state only: panel
+  placement/size, drag state, hot/active control id, open menu, previous
+  mouse — it renders app/game state passed in and returns intents, it does
+  not own domain data. Reports any clicked `CommandId` (`UiTakeCommand`) and
+  whether it owns the pointer/keyboard this frame (`UiWantsMouse` /
+  `UiWantsKeyboard`, true over any panel or during a drag).
   `PushVertex` asserts on overflow of the 65536-vertex buffer. Text is one
   textured quad per character (`mode` 1, uv into the glyph atlas); the
   monospace 8x8 cell means `TextWidth` is just `strlen * 8 * scale`, no

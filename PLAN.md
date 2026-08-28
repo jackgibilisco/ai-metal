@@ -450,10 +450,10 @@ to a future Windows backend, and the UI is authored in code by a developer
 ### Decisions
 - **Immediate-mode core with a small retained blob.** `ui.h`/`ui.cpp` is
   pure C++ (no Metal, no AppKit). Each frame it reads one `FrameInput`,
-  runs the widget calls, and fills a flat vertex list. The only state that
-  survives frames is the splitter position, the hot/active widget id, the
-  previous mouse state, and the demo widget values. No widget tree, no
-  event routing.
+  runs the control calls, and fills a flat vertex list. The only state that
+  survives frames is the panel placement/size, the hot/active control id,
+  the previous mouse state, and the demo control values. No retained widget
+  tree, no event routing.
 - **The panel shrinks the 3D viewport.** The scene renders into the
   rectangle left of the panel, not behind it. The renderer's screen-sized
   targets are sized to that content rect; the final pass writes a
@@ -480,7 +480,7 @@ to a future Windows backend, and the UI is authored in code by a developer
   uses right/middle/scroll, the UI uses left-drag, so they don't collide).
 - Reallocation throttling while dragging the splitter (a few screen-target
   reallocs per drag is acceptable for now).
-- Glyph-atlas text, widget theming, keyboard focus/text entry.
+- Control theming, keyboard focus/text entry.
 
 ### Steps (done)
 1. Branch `ui-panel`.
@@ -507,7 +507,7 @@ to a future Windows backend, and the UI is authored in code by a developer
 9. `Makefile`: add `src/ui.cpp`, `src/ui_render_metal.mm`.
 10. `make run`; visually verify: right-side dark panel; 3 buttons highlight
     on hover and depress on click; 2 sliders track the cursor with live
-    handle + readout; dragging the splitter resizes the panel, the widgets
+    handle + readout; dragging the splitter resizes the panel, the controls
     reflow to the new width, and the 3D viewport grows/shrinks to fill the
     rest; no Metal validation errors.
 11. Update this section and `CLAUDE.md`.
@@ -771,3 +771,79 @@ platform with no `NSMenu` (a Windows port) would have no working shortcuts.
 - Dynamic command registration (static table is enough).
 - Chord shortcuts / non-Cmd accelerators (the `Shortcut.mods` bitfield
   supports them; nothing needs them yet).
+
+## Feature: dockable tear-off panels
+
+### Problem
+The UI had one hard-coded resizable right panel. The renderer critique
+(rec #6) wants many panels the developer can dock to any edge or float, and
+tear off by the title bar — "like Unity" — without a retained widget tree.
+
+### Terminology
+A **panel** is a titled, dockable, tear-off container. Every panel has a
+**title bar** (the drag handle). Buttons/sliders/labels are **controls**.
+"Widget" is no longer used for either.
+
+### API (`ui.h`, immediate-mode)
+```
+UiBeginPanel(ui, id, "Title", initialDock, initialSize)  // id is stable + nonzero
+  UiPanelButton(ui, "label") -> bool
+  UiPanelSlider(ui, "label", &value)
+  UiPanelText(ui, "line")
+UiEndPanel(ui)
+```
+`initialDock`/`initialSize` apply only the first time an id is seen
+(`UiDock_Float|Left|Right|Top|Bottom`). The calls are unconditional: while a
+panel's title bar is being dragged the UI sets an internal `suppressBody`
+flag and the control calls become no-ops, so the app never branches on drag
+state. `UiBuildFrame` itself builds the two demo panels ("Controls" docked
+right, "Scene" docked left) with these calls; a real app would move that
+block into its own frame code.
+
+### Dock model (`ui.cpp`)
+- Per-panel retained state (`PanelState` in `UiState`, keyed by id, capacity
+  `kMaxPanels`): `dock`, `dockSize` (width for L/R, height for T/B),
+  `floatRect`.
+- `ResolvePanelLayout` starts a `free` rect = drawable minus the menu strip,
+  carves each docked panel off the matching edge in slot order, and the
+  leftover `free` is `contentRect` — the 3D viewport, fed to the renderer
+  through the existing `UiContentOriginX/Y` + `UiContentWidth/Height` (X/Y
+  are no longer hard-zero). Floating panels use `floatRect` and draw on top;
+  they do not shrink the viewport.
+- Run order per frame: `ResolvePanelLayout` -> `UpdatePanelInteraction`
+  (hit-tests title bars / resize grips against the resolved rects) ->
+  `ResolvePanelLayout` again, so a drag that starts or ends this frame
+  reflows the viewport the same frame.
+
+### Tear-off
+- `UpdatePanelInteraction`: a left-press on a title bar sets
+  `draggedPanel = id` and snapshots a floating size. While held, only a
+  2px **outline rectangle** is pushed (`PushBorder`) — no chrome, no
+  content, no layout. `ResolvePanelLayout` skips the dragged panel so the
+  viewport expands into its old slot immediately.
+- The outline follows the cursor, and snaps to a full edge-dock rectangle
+  when the cursor is within `kDockSnapMargin` of a screen edge.
+- On release: dock to the previewed edge (setting `dockSize`), or float at
+  the outline rect. Content renders again next frame.
+- Docked panels also get a resize grip on their content-facing edge
+  (`resizePanel` drag adjusts `dockSize`).
+- `UiWantsMouse` is true over any panel rect or during a drag/resize, so the
+  camera stays suppressed and the render loop keeps ticking mid-drag.
+
+### Verified
+`make` clean. `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`: no validation
+errors windowed or fullscreen. Screenshots: both panels docked with title
+bars and the viewport carved to the leftover centre; a forced drag state
+shows the outline only with the panel's content gone and the viewport
+widened; forced float and forced top-dock render correctly with the
+viewport reflowed. Live title-bar dragging via synthetic CGEvents could not
+be exercised (the sandbox lacks the Accessibility grant to post them); the
+drag/commit state machine is covered by the forced-state runs and one real
+drag that landed as a float on release.
+
+### Not doing yet
+- Real OS-window tear-off (separate `CAMetalLayer` + display link per
+  window). Floating panels are in the one drawable for now.
+- Split trees, tabbed docks, drop zones other than the four edges.
+- Off-screen clamping of a floating panel's controls (the panel rect is
+  clamped; very small panels clip their content).

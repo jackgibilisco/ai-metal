@@ -7,12 +7,6 @@
 
 namespace {
 
-constexpr float kPanelStartWidth = 260.0f;
-constexpr float kPanelMinWidth = 150.0f;
-constexpr float kPanelMaxWidth = 520.0f;
-constexpr float kMinContentWidth = 120.0f;
-constexpr float kSplitterWidth = 6.0f;
-
 constexpr float kPadding = 14.0f;
 constexpr float kRowGap = 9.0f;
 constexpr float kButtonHeight = 30.0f;
@@ -34,6 +28,16 @@ constexpr float kMenuDropdownMinWidth = 180.0f;
 constexpr float kMenuShortcutColumn = 72.0f;
 constexpr float kMenuCheckColumn = 26.0f; // left gutter for the checkmark dot
 
+constexpr int kMaxPanels = 4;
+constexpr float kTitleBarHeight = 24.0f;
+constexpr float kPanelBorderPx = 1.0f;
+constexpr float kResizeGripPx = 6.0f;
+constexpr float kDockSnapMargin = 56.0f;   // cursor within this of an edge -> dock preview
+constexpr float kPanelMinDockSize = 150.0f;
+constexpr float kDockMaxFraction = 0.6f;
+constexpr float kFloatMinW = 170.0f;
+constexpr float kFloatMinH = 90.0f;
+
 constexpr int kMaxVertices = 65536;
 
 struct Color {
@@ -41,8 +45,12 @@ struct Color {
 };
 
 constexpr Color kPanelBg = {28, 30, 34, 255};
-constexpr Color kSplitterCol = {58, 62, 70, 255};
-constexpr Color kSplitterHot = {92, 142, 222, 255};
+constexpr Color kTitleBarCol = {40, 44, 51, 255};
+constexpr Color kTitleBarHot = {54, 59, 69, 255};
+constexpr Color kPanelBorderCol = {62, 66, 75, 255};
+constexpr Color kResizeGripCol = {58, 62, 70, 255};
+constexpr Color kResizeGripHot = {92, 142, 222, 255};
+constexpr Color kDragOutlineCol = {96, 150, 232, 255};
 constexpr Color kButtonCol = {52, 57, 66, 255};
 constexpr Color kButtonHot = {70, 77, 90, 255};
 constexpr Color kButtonActive = {92, 142, 222, 255};
@@ -66,22 +74,49 @@ bool PointInRect(float px, float py, Rect r) {
     return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
 }
 
+float Clamp(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+struct PanelState {
+    int id; // 0 = empty slot
+    int dock;
+    float dockSize;  // width for Left/Right, height for Top/Bottom
+    Rect floatRect;
+};
+
 } // namespace
 
 struct UiState {
     float drawableWidth;
     float drawableHeight;
-    float panelWidth;
-    float contentWidth;
-    bool draggingSplitter;
 
     MenuBar menuBar;
-    CommandContext menuContext;    // set each frame; menu rendering queries it
-    int openMenu;                  // -1 when closed
+    CommandContext menuContext; // set each frame; menu rendering queries it
+    int openMenu;               // -1 when closed
     CommandId pendingCommand;
     bool menuBarVisible;
-    float menuBarHeight;           // 0 when the strip is hidden
-    bool menuHasPointer;           // the strip/dropdown owns the cursor this frame
+    float menuBarHeight; // 0 when the strip is hidden
+    bool menuHasPointer; // the strip/dropdown owns the cursor this frame
+
+    PanelState panels[kMaxPanels];
+    Rect panelRects[kMaxPanels]; // resolved this frame; parallel to panels[]
+    Rect contentRect;            // the 3D viewport: drawable minus strip and docked panels
+
+    int draggedPanel;  // id, 0 = none (retained across frames while held)
+    float dragGrabX;   // cursor offset within the title bar at grab
+    float dragGrabY;
+    float dragW; // floating size the panel takes if dropped free
+    float dragH;
+    int dragPreviewDock;
+    Rect dragOutline;
+    int resizePanel; // id of the panel whose dock edge is being dragged, 0 = none
+
+    int currentPanel; // id between UiBeginPanel/UiEndPanel, 0 = none
+    Rect currentBody; // control layout area inside the current panel
+    float panelCursorY;
+    int controlIndex;
+    bool suppressBody; // current panel is being torn off: skip its controls
 
     int hotId;
     int activeId;
@@ -129,6 +164,13 @@ void PushQuad(UiState *ui, float x0, float y0, float x1, float y1, float x2, flo
 
 void PushRect(UiState *ui, Rect r, Color c) {
     PushQuad(ui, r.x, r.y, r.x + r.w, r.y, r.x + r.w, r.y + r.h, r.x, r.y + r.h, c);
+}
+
+void PushBorder(UiState *ui, Rect r, float t, Color c) {
+    PushRect(ui, {r.x, r.y, r.w, t}, c);
+    PushRect(ui, {r.x, r.y + r.h - t, r.w, t}, c);
+    PushRect(ui, {r.x, r.y, t, r.h}, c);
+    PushRect(ui, {r.x + r.w - t, r.y, t, r.h}, c);
 }
 
 void PushGlyph(UiState *ui, float x, float y, float u0, float u1, Color c) {
@@ -199,13 +241,7 @@ void Slider(UiState *ui, int id, Rect r, const char *label, float *value) {
     }
     if (ui->activeId == id && ui->mouseDown) {
         float t = (ui->mouseX - r.x) / r.w;
-        if (t < 0.0f) {
-            t = 0.0f;
-        }
-        if (t > 1.0f) {
-            t = 1.0f;
-        }
-        *value = t;
+        *value = Clamp(t, 0.0f, 1.0f);
     }
 
     PushText(ui, r.x, r.y, label, kTextCol);
@@ -220,6 +256,8 @@ void Slider(UiState *ui, int id, Rect r, const char *label, float *value) {
     Color handleColor = (ui->hotId == id || ui->activeId == id) ? kHandleHot : kHandleCol;
     PushRect(ui, {handleX, trackY - 8.0f, 12.0f, 22.0f}, handleColor);
 }
+
+// ---- menu strip ---------------------------------------------------------
 
 float MenuTitleX(const UiState *ui, int menuIndex) {
     float x = kMenuTitlePadX;
@@ -372,31 +410,261 @@ void MenuDraw(UiState *ui) {
     }
 }
 
+// ---- panels -----------------------------------------------------------
+
+int PanelSlot(const UiState *ui, int id) {
+    for (int i = 0; i < kMaxPanels; ++i) {
+        if (ui->panels[i].id == id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int PanelSlotOrCreate(UiState *ui, int id, int initialDock, float initialSize) {
+    int slot = PanelSlot(ui, id);
+    if (slot >= 0) {
+        return slot;
+    }
+    for (int i = 0; i < kMaxPanels; ++i) {
+        if (ui->panels[i].id != 0) {
+            continue;
+        }
+        PanelState &p = ui->panels[i];
+        p.id = id;
+        p.dock = initialDock;
+        p.dockSize = initialSize;
+        p.floatRect = {60.0f + (float)i * 26.0f, kMenuBarHeight + 46.0f + (float)i * 26.0f, 264.0f,
+                       208.0f};
+        return i;
+    }
+    return 0;
+}
+
+Rect ClampFloatRect(const UiState *ui, Rect r) {
+    float top = ui->menuBarHeight;
+    r.w = Clamp(r.w, kFloatMinW, ui->drawableWidth);
+    r.h = Clamp(r.h, kFloatMinH, ui->drawableHeight - top);
+    r.x = Clamp(r.x, 0.0f, ui->drawableWidth - r.w);
+    r.y = Clamp(r.y, top, ui->drawableHeight - r.h);
+    return r;
+}
+
+float DockLimit(const UiState *ui, int dock) {
+    if (dock == UiDock_Left || dock == UiDock_Right) {
+        return ui->drawableWidth * kDockMaxFraction;
+    }
+    return (ui->drawableHeight - ui->menuBarHeight) * kDockMaxFraction;
+}
+
+Rect DockRect(const UiState *ui, int dock, float size) {
+    float top = ui->menuBarHeight;
+    float fullH = ui->drawableHeight - top;
+    if (dock == UiDock_Left) {
+        return {0.0f, top, size, fullH};
+    }
+    if (dock == UiDock_Right) {
+        return {ui->drawableWidth - size, top, size, fullH};
+    }
+    if (dock == UiDock_Top) {
+        return {0.0f, top, ui->drawableWidth, size};
+    }
+    return {0.0f, ui->drawableHeight - size, ui->drawableWidth, size};
+}
+
+void ResolvePanelLayout(UiState *ui) {
+    Rect free = {0.0f, ui->menuBarHeight, ui->drawableWidth, ui->drawableHeight - ui->menuBarHeight};
+
+    for (int i = 0; i < kMaxPanels; ++i) {
+        ui->panelRects[i] = {0.0f, 0.0f, 0.0f, 0.0f};
+        PanelState &p = ui->panels[i];
+        if (p.id == 0 || p.id == ui->draggedPanel) {
+            continue;
+        }
+        if (p.dock == UiDock_Float) {
+            ui->panelRects[i] = ClampFloatRect(ui, p.floatRect);
+            continue;
+        }
+        float size = Clamp(p.dockSize, kPanelMinDockSize, DockLimit(ui, p.dock));
+        if (p.dock == UiDock_Left) {
+            ui->panelRects[i] = {free.x, free.y, size, free.h};
+            free.x += size;
+            free.w -= size;
+        } else if (p.dock == UiDock_Right) {
+            ui->panelRects[i] = {free.x + free.w - size, free.y, size, free.h};
+            free.w -= size;
+        } else if (p.dock == UiDock_Top) {
+            ui->panelRects[i] = {free.x, free.y, free.w, size};
+            free.y += size;
+            free.h -= size;
+        } else {
+            ui->panelRects[i] = {free.x, free.y + free.h - size, free.w, size};
+            free.h -= size;
+        }
+    }
+
+    free.x = floorf(free.x);
+    free.y = floorf(free.y);
+    free.w = floorf(free.w);
+    free.h = floorf(free.h);
+    if (free.w < 1.0f) {
+        free.w = 1.0f;
+    }
+    if (free.h < 1.0f) {
+        free.h = 1.0f;
+    }
+    ui->contentRect = free;
+}
+
+Rect ResizeGripRect(const UiState *ui, int slot) {
+    const PanelState &p = ui->panels[slot];
+    if (p.id == 0 || p.id == ui->draggedPanel || p.dock == UiDock_Float) {
+        return {0.0f, 0.0f, 0.0f, 0.0f};
+    }
+    Rect r = ui->panelRects[slot];
+    if (r.w <= 0.0f) {
+        return {0.0f, 0.0f, 0.0f, 0.0f};
+    }
+    float g = kResizeGripPx;
+    if (p.dock == UiDock_Left) {
+        return {r.x + r.w - g, r.y, g, r.h};
+    }
+    if (p.dock == UiDock_Right) {
+        return {r.x, r.y, g, r.h};
+    }
+    if (p.dock == UiDock_Top) {
+        return {r.x, r.y + r.h - g, r.w, g};
+    }
+    return {r.x, r.y, r.w, g};
+}
+
+int EdgeDockPreview(const UiState *ui) {
+    float top = ui->menuBarHeight;
+    if (ui->mouseX < kDockSnapMargin) {
+        return UiDock_Left;
+    }
+    if (ui->mouseX > ui->drawableWidth - kDockSnapMargin) {
+        return UiDock_Right;
+    }
+    if (ui->mouseY < top + kDockSnapMargin) {
+        return UiDock_Top;
+    }
+    if (ui->mouseY > ui->drawableHeight - kDockSnapMargin) {
+        return UiDock_Bottom;
+    }
+    return UiDock_Float;
+}
+
+void UpdatePanelInteraction(UiState *ui) {
+    if (ui->draggedPanel != 0) {
+        int slot = PanelSlot(ui, ui->draggedPanel);
+        int preview = EdgeDockPreview(ui);
+        Rect outline;
+        if (preview == UiDock_Float) {
+            outline = {ui->mouseX - ui->dragGrabX, ui->mouseY - ui->dragGrabY, ui->dragW, ui->dragH};
+        } else {
+            float want = (preview == UiDock_Left || preview == UiDock_Right) ? ui->dragW : ui->dragH;
+            outline = DockRect(ui, preview, Clamp(want, kPanelMinDockSize, DockLimit(ui, preview)));
+        }
+        ui->dragOutline = outline;
+        ui->dragPreviewDock = preview;
+
+        if (!ui->mouseDown && slot >= 0) {
+            PanelState &p = ui->panels[slot];
+            if (preview == UiDock_Float) {
+                p.dock = UiDock_Float;
+                p.floatRect = ClampFloatRect(ui, outline);
+            } else {
+                p.dock = preview;
+                p.dockSize = (preview == UiDock_Left || preview == UiDock_Right) ? outline.w : outline.h;
+            }
+            ui->draggedPanel = 0;
+        }
+        return;
+    }
+
+    if (ui->resizePanel != 0) {
+        int slot = PanelSlot(ui, ui->resizePanel);
+        if (slot >= 0) {
+            PanelState &p = ui->panels[slot];
+            Rect r = ui->panelRects[slot];
+            float size = p.dockSize;
+            if (p.dock == UiDock_Left) {
+                size = ui->mouseX - r.x;
+            } else if (p.dock == UiDock_Right) {
+                size = r.x + r.w - ui->mouseX;
+            } else if (p.dock == UiDock_Top) {
+                size = ui->mouseY - r.y;
+            } else if (p.dock == UiDock_Bottom) {
+                size = r.y + r.h - ui->mouseY;
+            }
+            p.dockSize = Clamp(size, kPanelMinDockSize, DockLimit(ui, p.dock));
+        }
+        if (!ui->mouseDown) {
+            ui->resizePanel = 0;
+        }
+        return;
+    }
+
+    if (!ui->mousePressed) {
+        return;
+    }
+
+    for (int i = 0; i < kMaxPanels; ++i) {
+        if (ui->panels[i].id == 0) {
+            continue;
+        }
+        Rect grip = ResizeGripRect(ui, i);
+        if (grip.w > 0.0f && PointInRect(ui->mouseX, ui->mouseY, grip)) {
+            ui->resizePanel = ui->panels[i].id;
+            ui->mousePressed = false;
+            return;
+        }
+    }
+
+    for (int i = 0; i < kMaxPanels; ++i) {
+        if (ui->panels[i].id == 0) {
+            continue;
+        }
+        Rect r = ui->panelRects[i];
+        if (r.w <= 0.0f) {
+            continue;
+        }
+        Rect titleBar = {r.x, r.y, r.w, kTitleBarHeight};
+        if (PointInRect(ui->mouseX, ui->mouseY, titleBar)) {
+            ui->draggedPanel = ui->panels[i].id;
+            ui->dragGrabX = ui->mouseX - r.x;
+            ui->dragGrabY = ui->mouseY - r.y;
+            ui->dragW = Clamp(ui->panels[i].floatRect.w, kFloatMinW, 420.0f);
+            ui->dragH = Clamp(ui->panels[i].floatRect.h, kFloatMinH, 360.0f);
+            if (ui->dragGrabX > ui->dragW) {
+                ui->dragGrabX = ui->dragW * 0.5f;
+            }
+            ui->mousePressed = false;
+            return;
+        }
+    }
+}
+
 } // namespace
 
 UiState *UiInit(Arena *arena, float drawableWidth, float drawableHeight) {
     UiState *ui = ArenaPushStruct(arena, UiState);
     ui->drawableWidth = drawableWidth;
     ui->drawableHeight = drawableHeight;
-    ui->panelWidth = kPanelStartWidth;
-    ui->contentWidth = drawableWidth - kPanelStartWidth - kSplitterWidth;
     ui->menuBar = MenuBarDefault();
     ui->openMenu = -1;
+    ui->contentRect = {0.0f, 0.0f, drawableWidth, drawableHeight};
     return ui;
 }
 
 void UiHandleResize(UiState *ui, float drawableWidth, float drawableHeight) {
     ui->drawableWidth = drawableWidth;
     ui->drawableHeight = drawableHeight;
-    float maxWidth = drawableWidth - kMinContentWidth - kSplitterWidth;
-    if (maxWidth > kPanelMaxWidth) {
-        maxWidth = kPanelMaxWidth;
-    }
-    if (ui->panelWidth > maxWidth) {
-        ui->panelWidth = maxWidth;
-    }
-    if (ui->panelWidth < kPanelMinWidth) {
-        ui->panelWidth = kPanelMinWidth;
+    for (int i = 0; i < kMaxPanels; ++i) {
+        if (ui->panels[i].id != 0 && ui->panels[i].dock == UiDock_Float) {
+            ui->panels[i].floatRect = ClampFloatRect(ui, ui->panels[i].floatRect);
+        }
     }
 }
 
@@ -417,58 +685,30 @@ void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiD
         ui->mousePressed = false;
     }
 
-    float splitterHitX = ui->drawableWidth - ui->panelWidth - kSplitterWidth;
-    Rect splitterHit = {splitterHitX, 0.0f, kSplitterWidth, ui->drawableHeight};
-    bool splitterHover = PointInRect(ui->mouseX, ui->mouseY, splitterHit);
+    ResolvePanelLayout(ui);
+    UpdatePanelInteraction(ui);
+    ResolvePanelLayout(ui); // reflect a drag/resize that started or ended this frame
 
-    if (splitterHover && ui->mousePressed) {
-        ui->draggingSplitter = true;
+    UiBeginPanel(ui, 1, "Controls", UiDock_Right, 264.0f);
+    UiPanelButton(ui, "Button A");
+    UiPanelButton(ui, "Button B");
+    UiPanelButton(ui, "Reset");
+    UiPanelSlider(ui, "Speed", &demo->speed);
+    UiPanelSlider(ui, "Zoom", &demo->zoom);
+    UiEndPanel(ui);
+
+    UiBeginPanel(ui, 2, "Scene", UiDock_Left, 208.0f);
+    char line[48];
+    snprintf(line, sizeof(line), "View %d x %d", (int)ui->contentRect.w, (int)ui->contentRect.h);
+    UiPanelText(ui, line);
+    snprintf(line, sizeof(line), "Win  %d x %d", (int)ui->drawableWidth, (int)ui->drawableHeight);
+    UiPanelText(ui, line);
+    UiPanelButton(ui, "Reset Camera");
+    UiEndPanel(ui);
+
+    if (ui->draggedPanel != 0) {
+        PushBorder(ui, ui->dragOutline, 2.0f, kDragOutlineCol);
     }
-    if (!ui->mouseDown) {
-        ui->draggingSplitter = false;
-    }
-    if (ui->draggingSplitter) {
-        float maxWidth = ui->drawableWidth - kMinContentWidth - kSplitterWidth;
-        if (maxWidth > kPanelMaxWidth) {
-            maxWidth = kPanelMaxWidth;
-        }
-        ui->panelWidth = ui->drawableWidth - ui->mouseX - kSplitterWidth * 0.5f;
-        if (ui->panelWidth < kPanelMinWidth) {
-            ui->panelWidth = kPanelMinWidth;
-        }
-        if (ui->panelWidth > maxWidth) {
-            ui->panelWidth = maxWidth;
-        }
-    }
-
-    float contentWidth = floorf(ui->drawableWidth - ui->panelWidth - kSplitterWidth);
-    if (contentWidth < 1.0f) {
-        contentWidth = 1.0f;
-    }
-    ui->contentWidth = contentWidth;
-
-    float splitterX = contentWidth;
-    float panelX = contentWidth + kSplitterWidth;
-    float panelW = ui->drawableWidth - panelX;
-
-    PushRect(ui, {panelX, 0.0f, panelW, ui->drawableHeight}, kPanelBg);
-    PushRect(ui, {splitterX, 0.0f, kSplitterWidth, ui->drawableHeight},
-             (splitterHover || ui->draggingSplitter) ? kSplitterHot : kSplitterCol);
-
-    float widgetX = panelX + kPadding;
-    float widgetW = panelW - kPadding * 2.0f;
-    float cursorY = ui->menuBarHeight + kPadding;
-
-    Button(ui, 1, {widgetX, cursorY, widgetW, kButtonHeight}, "Button A");
-    cursorY += kButtonHeight + kRowGap;
-    Button(ui, 2, {widgetX, cursorY, widgetW, kButtonHeight}, "Button B");
-    cursorY += kButtonHeight + kRowGap;
-    Button(ui, 3, {widgetX, cursorY, widgetW, kButtonHeight}, "Reset");
-    cursorY += kButtonHeight + kRowGap * 2.0f;
-
-    Slider(ui, 10, {widgetX, cursorY, widgetW, kSliderHeight}, "Speed", &demo->speed);
-    cursorY += kSliderHeight + kRowGap;
-    Slider(ui, 11, {widgetX, cursorY, widgetW, kSliderHeight}, "Zoom", &demo->zoom);
 
     MenuDraw(ui);
 
@@ -478,6 +718,78 @@ void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiD
     ui->prevMouseDown = ui->mouseDown;
 }
 
+void UiBeginPanel(UiState *ui, UiPanelId id, const char *title, int initialDock, float initialSize) {
+    int slot = PanelSlotOrCreate(ui, id, initialDock, initialSize);
+    ui->currentPanel = id;
+    ui->controlIndex = 0;
+    ui->suppressBody = (id == ui->draggedPanel);
+    if (ui->suppressBody) {
+        return; // torn off this frame: no chrome, no body; the outline stands in
+    }
+
+    Rect r = ui->panelRects[slot];
+    if (r.w <= 0.0f || r.h <= 0.0f) {
+        ui->suppressBody = true;
+        return;
+    }
+
+    PushRect(ui, r, kPanelBg);
+
+    Rect titleBar = {r.x, r.y, r.w, kTitleBarHeight};
+    bool titleHot = ui->draggedPanel == 0 && ui->resizePanel == 0 &&
+                    PointInRect(ui->mouseX, ui->mouseY, titleBar);
+    PushRect(ui, titleBar, titleHot ? kTitleBarHot : kTitleBarCol);
+    PushText(ui, r.x + 8.0f, r.y + (kTitleBarHeight - kGlyphHeight * kTextScale) * 0.5f, title,
+             kTextCol);
+
+    Rect grip = ResizeGripRect(ui, slot);
+    if (grip.w > 0.0f) {
+        bool gripHot = ui->resizePanel == ui->panels[slot].id ||
+                       PointInRect(ui->mouseX, ui->mouseY, grip);
+        PushRect(ui, grip, gripHot ? kResizeGripHot : kResizeGripCol);
+    }
+
+    PushBorder(ui, r, kPanelBorderPx, kPanelBorderCol);
+
+    ui->currentBody = {r.x + kPadding, r.y + kTitleBarHeight + kPadding, r.w - kPadding * 2.0f,
+                       r.h - kTitleBarHeight - kPadding * 2.0f};
+    ui->panelCursorY = ui->currentBody.y;
+}
+
+void UiEndPanel(UiState *ui) {
+    ui->currentPanel = 0;
+    ui->suppressBody = false;
+}
+
+bool UiPanelButton(UiState *ui, const char *label) {
+    int id = ui->currentPanel * 1000 + (++ui->controlIndex);
+    if (ui->suppressBody) {
+        return false;
+    }
+    Rect r = {ui->currentBody.x, ui->panelCursorY, ui->currentBody.w, kButtonHeight};
+    ui->panelCursorY += kButtonHeight + kRowGap;
+    return Button(ui, id, r, label);
+}
+
+void UiPanelSlider(UiState *ui, const char *label, float *value) {
+    int id = ui->currentPanel * 1000 + (++ui->controlIndex);
+    if (ui->suppressBody) {
+        return;
+    }
+    Rect r = {ui->currentBody.x, ui->panelCursorY, ui->currentBody.w, kSliderHeight};
+    ui->panelCursorY += kSliderHeight + kRowGap;
+    Slider(ui, id, r, label, value);
+}
+
+void UiPanelText(UiState *ui, const char *text) {
+    ++ui->controlIndex;
+    if (ui->suppressBody) {
+        return;
+    }
+    PushText(ui, ui->currentBody.x, ui->panelCursorY, text, kTextCol);
+    ui->panelCursorY += kGlyphHeight * kTextScale + kRowGap;
+}
+
 CommandId UiTakeCommand(UiState *ui) {
     CommandId command = ui->pendingCommand;
     ui->pendingCommand = Command_None;
@@ -485,9 +797,18 @@ CommandId UiTakeCommand(UiState *ui) {
 }
 
 bool UiWantsMouse(const UiState *ui) {
-    bool overPanel = ui->mouseX >= ui->contentWidth;
-    bool dragging = ui->draggingSplitter || ui->activeId != 0;
-    return overPanel || ui->menuHasPointer || dragging || ui->openMenu >= 0;
+    if (ui->menuHasPointer || ui->openMenu >= 0) {
+        return true;
+    }
+    if (ui->draggedPanel != 0 || ui->resizePanel != 0 || ui->activeId != 0) {
+        return true;
+    }
+    for (int i = 0; i < kMaxPanels; ++i) {
+        if (ui->panels[i].id != 0 && PointInRect(ui->mouseX, ui->mouseY, ui->panelRects[i])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool UiWantsKeyboard(const UiState *ui) {
@@ -495,21 +816,19 @@ bool UiWantsKeyboard(const UiState *ui) {
 }
 
 float UiContentOriginX(const UiState *ui) {
-    (void)ui;
-    return 0.0f;
+    return ui->contentRect.x;
 }
 
 float UiContentOriginY(const UiState *ui) {
-    return ui->menuBarHeight;
+    return ui->contentRect.y;
 }
 
 float UiContentWidth(const UiState *ui) {
-    return ui->contentWidth < 1.0f ? 1.0f : ui->contentWidth;
+    return ui->contentRect.w < 1.0f ? 1.0f : ui->contentRect.w;
 }
 
 float UiContentHeight(const UiState *ui) {
-    float height = ui->drawableHeight - ui->menuBarHeight;
-    return height < 1.0f ? 1.0f : height;
+    return ui->contentRect.h < 1.0f ? 1.0f : ui->contentRect.h;
 }
 
 float UiDrawableWidth(const UiState *ui) {
