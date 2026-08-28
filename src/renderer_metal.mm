@@ -378,6 +378,8 @@ struct RendererState {
     uint32_t screenHeight;
     uint32_t aoWidth;
     uint32_t aoHeight;
+    float contentOriginX;
+    float contentOriginY;
 
     id<MTLCounterSampleBuffer> timestampSampleBuffer;
     bool timingSupported;
@@ -626,26 +628,30 @@ RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
     state->debugMode = 0;
     state->fxaaEnabled = true;
 
-    RendererResize(state, drawableWidth, drawableHeight);
+    RendererSetContentRect(state, 0.0f, 0.0f, drawableWidth, drawableHeight);
 
     return state;
 }
 
-void RendererResize(RendererState *renderer, float drawableWidth, float drawableHeight) {
-    if (drawableWidth <= 0.0f || drawableHeight <= 0.0f) {
+void RendererSetContentRect(RendererState *renderer, float originX, float originY, float width,
+                            float height) {
+    if (width <= 0.0f || height <= 0.0f) {
         return;
     }
-    float aspectRatio = drawableWidth / drawableHeight;
+    renderer->contentOriginX = originX;
+    renderer->contentOriginY = originY;
+
+    float aspectRatio = width / height;
     renderer->projection =
         Mat4Perspective(60.0f * (float)M_PI / 180.0f, aspectRatio, 0.1f, 100.0f);
     renderer->view = OrbitCameraViewMatrix(renderer->cameraTarget, renderer->cameraDistance,
                                             renderer->cameraYaw, renderer->cameraPitch);
     renderer->viewProjection = Mat4Multiply(renderer->projection, renderer->view);
 
-    AllocateScreenTargets(renderer, (uint32_t)drawableWidth, (uint32_t)drawableHeight);
+    AllocateScreenTargets(renderer, (uint32_t)width, (uint32_t)height);
 }
 
-void RendererUpdateCamera(RendererState *renderer, CameraInput input) {
+void RendererUpdateCamera(RendererState *renderer, FrameInput input) {
     if (input.cycleDebugView) {
         renderer->debugMode = (renderer->debugMode + 1) % 3;
     }
@@ -761,7 +767,7 @@ void EncodeAoPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer) {
 }
 
 void EncodeLightingPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer,
-                        id<MTLTexture> destination) {
+                        id<MTLTexture> destination, MTLViewport viewport) {
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = destination;
     pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
@@ -782,6 +788,9 @@ void EncodeLightingPass(RendererState *renderer, id<MTLCommandBuffer> commandBuf
     id<MTLRenderCommandEncoder> encoder =
         [commandBuffer renderCommandEncoderWithDescriptor:pass];
     [encoder setRenderPipelineState:renderer->lightingPipeline];
+    // `destination` may be the full drawable while the scene only fills the
+    // content region; the caller passes the region to write.
+    [encoder setViewport:viewport];
     [encoder setFragmentTexture:renderer->gNormalTexture atIndex:1];
     [encoder setFragmentTexture:renderer->aoRawTexture atIndex:2];
     [encoder setFragmentBytes:&params length:sizeof(params) atIndex:0];
@@ -790,7 +799,7 @@ void EncodeLightingPass(RendererState *renderer, id<MTLCommandBuffer> commandBuf
 }
 
 void EncodeFxaaPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer,
-                    id<MTLTexture> destination) {
+                    id<MTLTexture> destination, MTLViewport viewport) {
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = destination;
     pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
@@ -803,6 +812,7 @@ void EncodeFxaaPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer,
     id<MTLRenderCommandEncoder> encoder =
         [commandBuffer renderCommandEncoderWithDescriptor:pass];
     [encoder setRenderPipelineState:renderer->fxaaPipeline];
+    [encoder setViewport:viewport];
     [encoder setFragmentTexture:renderer->litColorTexture atIndex:0];
     [encoder setFragmentBytes:inverseScreenSize length:sizeof(inverseScreenSize) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -838,15 +848,21 @@ void RendererRender(RendererState *renderer, const GameState *game, RenderTarget
     bool aoEnabled = renderer->debugMode != 2;
     bool fxaaEnabled = renderer->fxaaEnabled;
 
+    MTLViewport fullViewport = {0.0, 0.0, (double)renderer->screenWidth,
+                               (double)renderer->screenHeight, 0.0, 1.0};
+    MTLViewport contentViewport = {(double)renderer->contentOriginX, (double)renderer->contentOriginY,
+                                   (double)renderer->screenWidth, (double)renderer->screenHeight,
+                                   0.0, 1.0};
+
     EncodeGeometryPass(renderer, game, target.commandBuffer);
     if (aoEnabled) {
         EncodeAoPass(renderer, target.commandBuffer);
     }
     if (fxaaEnabled) {
-        EncodeLightingPass(renderer, target.commandBuffer, renderer->litColorTexture);
-        EncodeFxaaPass(renderer, target.commandBuffer, target.drawable.texture);
+        EncodeLightingPass(renderer, target.commandBuffer, renderer->litColorTexture, fullViewport);
+        EncodeFxaaPass(renderer, target.commandBuffer, target.drawable.texture, contentViewport);
     } else {
-        EncodeLightingPass(renderer, target.commandBuffer, target.drawable.texture);
+        EncodeLightingPass(renderer, target.commandBuffer, target.drawable.texture, contentViewport);
     }
 
     uint32_t encodedSlotMask =
@@ -854,9 +870,6 @@ void RendererRender(RendererState *renderer, const GameState *game, RenderTarget
     [target.commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer) {
         ResolvePassTimings(renderer, encodedSlotMask, commandBuffer);
     }];
-
-    [target.commandBuffer presentDrawable:target.drawable];
-    [target.commandBuffer commit];
 }
 
 RendererPassTimings RendererLastFrameTimings(const RendererState *renderer) {

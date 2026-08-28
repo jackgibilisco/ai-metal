@@ -8,6 +8,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include "arena.h"
+#include "frame_input.h"
 #include "game.h"
 
 struct RenderTarget {
@@ -16,19 +17,6 @@ struct RenderTarget {
 };
 
 struct RendererState;
-
-// Raw, per-frame accumulated pointer deltas. Plain floats so platform_macos.mm
-// (which reads the NSEvents) and app.mm (which just forwards this struct) don't
-// need to know anything about how the renderer interprets them.
-struct CameraInput {
-    float panX;       // two-finger drag or right-drag, points
-    float panY;       // two-finger drag or right-drag, points
-    float zoomDelta;  // pinch magnification or mouse wheel
-    float orbitYaw;   // shift + two-finger drag, shift-right-drag, or middle-drag, points
-    float orbitPitch; // shift + two-finger drag, shift-right-drag, or middle-drag, points
-    bool cycleDebugView; // one keypress: advance the AO debug view mode
-    bool toggleFxaa;     // one keypress: enable/disable the FXAA post pass
-};
 
 // GPU time in milliseconds for each pass of the last completed frame, for
 // the F3 HUD. A pass that didn't run that frame reads 0. Per-pass values
@@ -45,7 +33,13 @@ struct RendererPassTimings {
 RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
                              MTLPixelFormat colorFormat, MTLPixelFormat depthFormat,
                              float drawableWidth, float drawableHeight);
-void RendererResize(RendererState *renderer, float drawableWidth, float drawableHeight);
-void RendererUpdateCamera(RendererState *renderer, CameraInput input);
+
+// The scene renders into an `(originX, originY, width, height)` region of the
+// drawable (the part the UI panel and menu strip don't take). Sets the
+// projection aspect and rebuilds the screen-sized targets when the size
+// changes; the origin only shifts where the final pass writes the drawable.
+void RendererSetContentRect(RendererState *renderer, float originX, float originY, float width,
+                            float height);
+void RendererUpdateCamera(RendererState *renderer, FrameInput input);
 void RendererRender(RendererState *renderer, const GameState *game, RenderTarget target);
 RendererPassTimings RendererLastFrameTimings(const RendererState *renderer);

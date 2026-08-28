@@ -24,11 +24,14 @@ is enough to build.
 
 There is no test suite; verification is running the binary and confirming 3
 distinct, independently-rotating cubes render without a crash or Metal
-validation error in the console output. The `o` key cycles the ambient-
-occlusion debug view (normal / raw AO buffer / AO disabled); the `f` key
-toggles the FXAA post pass; `F3` toggles the frame-timing debug HUD (which
-also shows per-pass GPU time); ⌃⌘F (View menu) toggles borderless
-fullscreen.
+validation error in the console output, alongside a resizable right-hand UI
+panel (draggable splitter, demo buttons/sliders) that shrinks the 3D
+viewport. The `o` key cycles the ambient-occlusion debug view (normal / raw
+AO buffer / AO disabled); the `f` key toggles the FXAA post pass; `F3`
+toggles the frame-timing debug HUD (which also shows per-pass GPU time);
+⌃⌘F (View menu) toggles borderless fullscreen. In fullscreen an in-app menu
+strip appears at the top (mirroring the hidden macOS menu bar); View >
+Toggle Menu Bar also shows it while windowed.
 
 ## Architecture
 
@@ -39,44 +42,79 @@ never freed — the OS reclaims it on process exit. `ArenaPush`/`ArenaPushStruct
 only called during `Init`. `FrameUpdate` and `FrameRender` never touch the
 arena. The one thing (re)allocated after `Init` is the renderer's set of
 screen-sized Metal textures (the g-buffer, depth, half-res AO, and lit-color
-targets), rebuilt by `FrameResize` -> `RendererResize` when the drawable
-size changes — those are Metal allocations, not arena pushes.
+targets), rebuilt by `RendererSetContentRect` when the content region (the
+drawable minus the UI panel and menu strip) changes — those are Metal
+allocations, not arena pushes.
 
-The public API the platform layer drives is exactly three functions
-(`src/app.h`):
+The public API the platform layer drives (`src/app.h`):
 
 ```
-Init(arena, device, colorFormat, depthFormat, drawableW, drawableH)  // once
-FrameUpdate(arena, deltaTime, cameraInput)                           // every frame
-FrameRender(arena, RenderTarget)                                     // every frame
-FrameResize(arena, drawableW, drawableH)                             // on drawable resize
+Init(arena, device, colorFormat, depthFormat, drawableW, drawableH, menuHooks) // once
+FrameUpdate(arena, deltaTime, FrameInput)                                      // every frame
+FrameRender(arena, RenderTarget)                                              // every frame
+FrameResize(arena, drawableW, drawableH)                                      // on drawable resize
+AppDispatchMenuAction(arena, MenuAction) / AppMenuState(arena)                 // native menu bar
 ```
 
-`Init` pushes a small `AppState { GameState*, RendererState* }` as the very
-first thing in the arena (`src/app.mm`). `FrameUpdate`/`FrameRender` recover
-it by reinterpreting `arena->base` — there are no global/static pointers
-holding program state.
+`Init` pushes a small `AppState { GameState*, RendererState*, UiState*,
+UiRenderState*, MenuState, PlatformMenuHooks }` as the very first thing in
+the arena (`src/app.mm`). `FrameUpdate`/`FrameRender` recover it by
+reinterpreting `arena->base` — there are no global/static pointers holding
+program state. `FrameUpdate` builds the immediate-mode UI and routes any
+in-app menu click through the same `MenuInvoke` the native menu bar uses;
+`FrameRender` encodes the scene into the content region, then the UI overlay
+pass, then presents.
 
-Three layers, each with a different portability contract:
+The portable input/menu structs live in their own dependency-free headers
+(`src/frame_input.h`, `src/menu.h`) so the pure-C++ layers pull in no Metal.
+
+Layers, each with a different portability contract:
 
 - **`src/game.h`/`.cpp`** — pure, platform-agnostic C++. No Metal, no AppKit,
   no platform headers of any kind. Owns `GameState` (currently 3 `Cube`s:
   position + rotation) and `GameUpdate`, which just advances each cube's
   rotation by `deltaTime`. This is the file to extend for anything that is
   simulation/gameplay rather than rendering.
+- **`src/ui.h`/`.cpp`** — pure C++ immediate-mode UI, no Metal/AppKit. Each
+  frame `UiBuildFrame` reads one `FrameInput`, runs the widget calls (a
+  resizable right panel with buttons/sliders behind a draggable splitter,
+  plus a top menu strip generated from `MenuBarDefault()`), and fills a flat
+  `UiVertex` triangle list in screen-pixel coordinates. Only a small blob of
+  state survives frames (splitter width, hot/active widget id, open menu,
+  previous mouse). Reports the content rect the scene may use
+  (`UiContentOriginX/Y`, `UiContentWidth/Height` — drawable minus panel and
+  strip) and any clicked `MenuAction` (`UiTakeMenuAction`). Text is
+  solid-color quads via the vendored, ASCII-only
+  `src/third_party/stb_easy_font.h`.
+- **`src/menu.h`/`.cpp`** — pure C++ menu model: the `MenuAction` enum, the
+  `MenuBar` layout (`MenuBarDefault`), `MenuState` (the Show Menu Bar
+  preference), and `MenuInvoke`, which mutates `MenuState` for app-level
+  actions and calls out through a `PlatformMenuHooks` function-pointer
+  struct for the platform-only ones (import file, toggle fullscreen, quit).
+  Both the native `NSMenu` and the in-app strip are built from this model
+  and dispatch through `MenuInvoke`.
+- **`src/ui_render_metal.h`/`.mm`** — Metal backend for the UI: a
+  solid-color pipeline, a per-frame vertex buffer, and one alpha-blended
+  Load-action pass drawn on top of the drawable after the scene. A Windows
+  port adds a sibling `ui_render_d3d.*` and reuses `ui.cpp` unchanged.
 - **`src/renderer_metal.h`/`.mm`** — Metal-specific but OS-agnostic: it never
   touches AppKit/UIKit, only the Metal API. Owns `RendererState` (device, the
   four pipelines — geometry, AO, lighting, FXAA — depth state,
   vertex/index/uniform buffers, the screen-sized targets + lit-color target,
   the AO sample kernel + noise texture, per-pass GPU timestamp sample buffer,
   orbit-camera state, the AO debug mode, the FXAA on/off flag), cube/plane
-  mesh data, the embedded shader source, `RendererResize` (rebuilds the
-  projection and the screen targets for a new drawable size),
-  `RendererUpdateCamera` (applies a frame's `CameraInput` — trackpad/mouse
+  mesh data, the embedded shader source, `RendererSetContentRect` (rebuilds
+  the projection and the screen targets for a new content-region size, and
+  stores the origin the final pass writes the drawable at),
+  `RendererUpdateCamera` (applies a frame's `FrameInput` — trackpad/mouse
   pan/zoom/orbit deltas, plus the `o`-key debug-view cycle and `f`-key FXAA
   toggle — to the camera), and `RendererRender`, which encodes one frame from
   a `RenderTarget` (command buffer + drawable) handed in by the platform
-  layer. `RendererRender` runs a small deferred pipeline: geometry pass ->
+  layer. The screen targets are content-region-sized; the last pass takes an
+  `(originX, originY, w, h)` `MTLViewport` so the scene lands below the menu
+  strip and left of the panel, and the UI pass fills the rest.
+  `RendererRender` no longer presents or commits — `FrameRender` does, after
+  the UI pass. It runs a small deferred pipeline: geometry pass ->
   a single g-buffer (RGBA16F: xyz = view-space normal, w = view-space Z, from
   which view-space X/Y are reconstructed), then a full-screen half-res SSAO
   pass, then a lighting pass that folds in the 4x4 AO box blur, then an
@@ -88,15 +126,24 @@ Three layers, each with a different portability contract:
   drives `FrameUpdate` then `FrameRender` once per `CAMetalDisplayLink`
   callback), the arena allocation, and
   reading trackpad/mouse `NSEvent`s (`scrollWheel:`/`magnifyWithEvent:`/
-  `rightMouseDragged:`/`otherMouseDragged:`) and the `o`/`f`/`F3` keys
-  (`keyDown:`) on an `AppMetalView` subclass into the `CameraInput`
-  passed to `FrameUpdate`, and forwarding `MTKView`'s
-  `drawableSizeWillChange:` to `FrameResize`. It also owns `DebugHudView`,
+  `rightMouseDragged:`/`otherMouseDragged:` for the camera; left
+  `mouseDown:`/`mouseUp:`/`mouseDragged:`/`mouseMoved:` + a tracking area
+  for the UI cursor) and the `o`/`f`/`F3` keys (`keyDown:`) on an
+  `AppMetalView` subclass into the `FrameInput` (which also carries a
+  `fullscreen` flag) passed to `FrameUpdate`, and forwarding `MTKView`'s
+  `drawableSizeWillChange:` to `FrameResize`. `InstallMainMenu` builds the
+  `NSMenu` bar by iterating `MenuBarDefault()`; every item carries its
+  `MenuAction` in its `tag` and routes through one `-dispatchMenuAction:` ->
+  `AppDispatchMenuAction`, with `-validateMenuItem:` reflecting
+  `AppMenuState` (and disabling Toggle Menu Bar while fullscreen). The
+  platform-only actions are `PlatformMenuHooks` C trampolines handed to
+  `Init`. It also owns `DebugHudView`,
   a pass-through `NSView` overlay that renders the `F3` frame-timing HUD
   from a `FrameStats` (`src/frame_stats.h`, header-only pure C++) fed one
-  `deltaTime` sample per frame. A future second platform (e.g. iOS) would
-  add a new file at this layer only; `game.*` and `renderer_metal.*` are
-  unchanged. `MTKView`'s built-in draw loop is left paused
+  `deltaTime` sample per frame. A future second platform (e.g. iOS or
+  Windows) would add a new file at this layer plus a `ui_render_*` backend,
+  and fill in `PlatformMenuHooks`; `game.*`, `ui.*`, `menu.*`, and
+  `renderer_metal.*` are unchanged. `MTKView`'s built-in draw loop is left paused
   (`paused = YES`, `enableSetNeedsDisplay = NO`) — it caps at 120 Hz on
   macOS, and so does an `NSView` `CADisplayLink`. Frames are driven instead
   by a `CAMetalDisplayLink` on the view's `CAMetalLayer`, whose
@@ -145,8 +192,9 @@ value and releases whatever was previously there — if that memory is
 uninitialized garbage instead of `nil`, this crashes. That's why the arena's
 backing memory is obtained with `calloc`, not `malloc`
 (`src/platform_macos.mm`): zeroing guarantees every `id` field starts as
-`nil` before its first assignment. If you ever add a second Metal-object-
-holding struct pushed into the arena, this same requirement applies to it.
+`nil` before its first assignment. `UiRenderState` (pipeline + vertex
+buffer) is a second such struct pushed into the arena and relies on the
+same zeroing; any further Metal-object-holding arena struct must too.
 
 The SSAO screen targets are assigned more than once (every drawable
 resize). That is safe for the same reason: each field holds either `nil` or

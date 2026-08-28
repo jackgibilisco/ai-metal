@@ -1,6 +1,8 @@
 #include "app.h"
 
 #include "game.h"
+#include "ui.h"
+#include "ui_render_metal.h"
 
 namespace {
 
@@ -9,37 +11,73 @@ namespace {
 struct AppState {
     GameState *game;
     RendererState *renderer;
+    UiState *ui;
+    UiRenderState *uiRender;
+    MenuState menu;
+    PlatformMenuHooks menuHooks;
 };
 
 } // namespace
 
 void Init(Arena *arena, id<MTLDevice> device, MTLPixelFormat colorFormat,
-          MTLPixelFormat depthFormat, float drawableWidth, float drawableHeight) {
+          MTLPixelFormat depthFormat, float drawableWidth, float drawableHeight,
+          PlatformMenuHooks menuHooks) {
     AppState *appState = ArenaPushStruct(arena, AppState);
     appState->game = GameInit(arena);
     appState->renderer =
         RendererInit(arena, device, colorFormat, depthFormat, drawableWidth, drawableHeight);
+    appState->ui = UiInit(arena, drawableWidth, drawableHeight);
+    appState->uiRender = UiRenderInit(arena, device, colorFormat);
+    appState->menuHooks = menuHooks;
 }
 
-void FrameUpdate(Arena *arena, float deltaTime, CameraInput cameraInput) {
+void FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     AppState *appState = (AppState *)arena->base;
     GameUpdate(appState->game, deltaTime);
-    RendererUpdateCamera(appState->renderer, cameraInput);
+    UiBuildFrame(appState->ui, input, appState->menu.showMenuBar);
+
+    MenuAction menuAction = UiTakeMenuAction(appState->ui);
+    if (menuAction != MenuAction_None) {
+        MenuInvoke(menuAction, &appState->menu, appState->menuHooks);
+    }
+
+    RendererUpdateCamera(appState->renderer, input);
 }
 
 void FrameRender(Arena *arena, RenderTarget target) {
     AppState *appState = (AppState *)arena->base;
+    RendererSetContentRect(appState->renderer, UiContentOriginX(appState->ui),
+                           UiContentOriginY(appState->ui), UiContentWidth(appState->ui),
+                           UiContentHeight(appState->ui));
     RendererRender(appState->renderer, appState->game, target);
+    UiRenderEncode(appState->uiRender, target, UiVertices(appState->ui),
+                   UiVertexCount(appState->ui), UiDrawableWidth(appState->ui),
+                   UiDrawableHeight(appState->ui));
+    [target.commandBuffer presentDrawable:target.drawable];
+    [target.commandBuffer commit];
 }
 
 void FrameResize(Arena *arena, float drawableWidth, float drawableHeight) {
     AppState *appState = (AppState *)arena->base;
-    RendererResize(appState->renderer, drawableWidth, drawableHeight);
+    UiHandleResize(appState->ui, drawableWidth, drawableHeight);
+    RendererSetContentRect(appState->renderer, UiContentOriginX(appState->ui),
+                           UiContentOriginY(appState->ui), UiContentWidth(appState->ui),
+                           UiContentHeight(appState->ui));
 }
 
 RendererPassTimings FrameGpuTimings(Arena *arena) {
     AppState *appState = (AppState *)arena->base;
     return RendererLastFrameTimings(appState->renderer);
+}
+
+void AppDispatchMenuAction(Arena *arena, MenuAction action) {
+    AppState *appState = (AppState *)arena->base;
+    MenuInvoke(action, &appState->menu, appState->menuHooks);
+}
+
+MenuState AppMenuState(Arena *arena) {
+    AppState *appState = (AppState *)arena->base;
+    return appState->menu;
 }
 
 bool ImportBlendFile(Arena *arena, const char *filepath) {

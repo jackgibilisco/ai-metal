@@ -437,3 +437,153 @@ fullscreen-bypass stall, not compute; see the refresh-rate section.)
 - Per-frame ring of counter sample buffers (the current single buffer can
   under-report per-pass times when several frames are in flight; the total
   from `GPUStartTime`/`GPUEndTime` stays accurate).
+
+## Feature: in-app UI panel (the renderer as one pane)
+
+### Problem
+The renderer should be one pane in a larger tool (like Unity's Game view),
+with room for a developer to build a toolbar / timeline / inspector around
+it. Constraints: no Electron, no Dear ImGui dependency, must stay portable
+to a future Windows backend, and the UI is authored in code by a developer
+(no visual editor needed).
+
+### Decisions
+- **Immediate-mode core with a small retained blob.** `ui.h`/`ui.cpp` is
+  pure C++ (no Metal, no AppKit). Each frame it reads one `FrameInput`,
+  runs the widget calls, and fills a flat vertex list. The only state that
+  survives frames is the splitter position, the hot/active widget id, the
+  previous mouse state, and the demo widget values. No widget tree, no
+  event routing.
+- **The panel shrinks the 3D viewport.** The scene renders into the
+  rectangle left of the panel, not behind it. The renderer's screen-sized
+  targets are sized to that content rect; the final pass writes a
+  `(0,0,contentW,contentH)` viewport of the drawable; the UI pass fills the
+  rest.
+- **Text is solid-color quads via vendored `stb_easy_font.h`** (public
+  domain, no texture, no atlas). The UI Metal shader is transform + vertex
+  color only. Crisp glyph atlas text is a later swap if wanted.
+- **`CameraInput` becomes `FrameInput`** and gains `mouseX`, `mouseY`
+  (backing pixels, top-left origin), `mouseDown`. Moved to a pure header
+  `frame_input.h` shared by `renderer_metal.h` and `ui.h` so the UI core
+  pulls in no Metal.
+- **New layer split.** `ui.h`/`.cpp` (pure C++, layout + interaction +
+  draw-list) and `ui_render_metal.h`/`.mm` (Metal backend: pipeline, vertex
+  upload, one Load-action pass onto the drawable). A Windows port adds
+  `ui_render_d3d.*` and reuses `ui.cpp` unchanged.
+- `RendererRender` stops calling `presentDrawable`/`commit`; `FrameRender`
+  encodes scene, then UI, then presents once.
+
+### Not doing yet (would be follow-ups)
+- Left / top / bottom panels and a real dock layout (only a right panel now;
+  content origin is hardcoded to 0,0).
+- Suppressing camera zoom/pan while the cursor is over the panel (camera
+  uses right/middle/scroll, the UI uses left-drag, so they don't collide).
+- Reallocation throttling while dragging the splitter (a few screen-target
+  reallocs per drag is acceptable for now).
+- Glyph-atlas text, widget theming, keyboard focus/text entry.
+
+### Steps (done)
+1. Branch `ui-panel`.
+2. `frame_input.h`: `FrameInput`. Rewire `renderer_metal.*`, `app.*`,
+   `platform_macos.mm` off `CameraInput`.
+3. Vendor `src/third_party/stb_easy_font.h`.
+4. `ui.h`/`ui.cpp`: `UiVertex`, `UiState`, `UiInit`, `UiHandleResize`,
+   `UiBuildFrame`, `UiContentWidth/Height`, `UiDrawableWidth/Height`,
+   `UiVertices`/`UiVertexCount`. Immediate-mode button / slider / vertical
+   splitter + a vertical layout cursor + demo values.
+5. `ui_render_metal.h`/`.mm`: `UiRenderInit`, `UiRenderEncode`. Embedded
+   solid-color shader, per-frame vertex buffer, quad index buffer,
+   alpha-blended Load-action pass to `target.drawable.texture`.
+6. `renderer_metal.*`: `RendererResize` -> `RendererSetContentSize`
+   (projection + targets from content size); `setViewport` clamp on the
+   final drawable-writing pass; drop present/commit from `RendererRender`.
+7. `app.*`: `AppState` gains `UiState*` + `UiRenderState*`; `FrameUpdate`
+   runs `UiBuildFrame`; `FrameRender` runs `RendererSetContentSize` ->
+   `RendererRender` -> `UiRenderEncode` -> present + commit; `FrameResize`
+   runs `UiHandleResize`.
+8. `platform_macos.mm`: tracking area + left `mouseDown:`/`mouseUp:`/
+   `mouseMoved:`/`mouseDragged:` -> pending mouse pos (backing px, top-left)
+   + down flag; fill `FrameInput`.
+9. `Makefile`: add `src/ui.cpp`, `src/ui_render_metal.mm`.
+10. `make run`; visually verify: right-side dark panel; 3 buttons highlight
+    on hover and depress on click; 2 sliders track the cursor with live
+    handle + readout; dragging the splitter resizes the panel, the widgets
+    reflow to the new width, and the 3D viewport grows/shrinks to fill the
+    rest; no Metal validation errors.
+11. Update this section and `CLAUDE.md`.
+
+## Feature: portable menu model + in-app menu strip
+
+### Problem
+Borderless fullscreen hides the macOS menu bar, so File > Import File and
+View > Toggle Full Screen become unreachable. The menu structure and
+dispatch also lived entirely in `platform_macos.mm` (`InstallMainMenu` plus
+three distinct AppKit selectors), which a Windows port would have to
+reinvent from scratch.
+
+### Decisions
+- **The menu is portable data.** `menu.h`/`menu.cpp`: a `MenuAction` enum,
+  `MenuItem`/`Menu`/`MenuBar` structs, and `MenuBarDefault()` building the
+  App / File / View layout. Both the native `NSMenu` and the in-app strip
+  are generated from this one model.
+- **One dispatch path.** `MenuInvoke(action, MenuState*, PlatformMenuHooks)`
+  in portable code. App-state actions (toggle menu bar) mutate `MenuState`;
+  platform-only actions (import file, toggle fullscreen, quit) call through
+  a `PlatformMenuHooks` function-pointer struct that `platform_macos.mm`
+  fills with C trampolines and hands to `Init`. Native menu-bar clicks
+  (`-dispatchMenuAction:` reading `NSMenuItem.tag`) and in-app menu clicks
+  (`UiTakeMenuAction`) both funnel through `AppDispatchMenuAction(arena,
+  action)`.
+- **Strip visibility = `fullscreen || MenuState.showMenuBar`.** View >
+  Toggle Menu Bar flips the preference. While fullscreen the strip cannot
+  be hidden: visibility ORs in `fullscreen`, the native item is disabled by
+  `-validateMenuItem:`, and the in-app item renders greyed and ignores
+  clicks.
+- **The strip shrinks the viewport.** `RendererSetContentSize` becomes
+  `RendererSetContentRect(x, y, w, h)`. The scene targets stay `w x h`; the
+  final drawable-writing pass takes an `(x, y, w, h)` `MTLViewport` so the
+  strip's band at the top of the drawable is left for the UI pass to fill.
+  `y` = strip height when visible, else 0. Intermediate passes still use
+  `(0, 0, w, h)`.
+- `FrameInput` gains `bool fullscreen` — platform state the app needs each
+  frame to compute strip visibility.
+- In-app text is ASCII-only (`stb_easy_font` indexes a 32..126 table), so
+  labels use "Import File..." not "Import File…".
+
+### Not doing yet
+- Checkmark glyph for the in-app toggle item (greyed text + native
+  `NSControlStateValue` only).
+- Hover-to-switch between open menus (click to open / switch / close only).
+- Submenus, separators, off-screen dropdown clamping.
+- Removing `AppMetalView -toggleFullScreen:` (now only a defensive catch
+  for a stray responder-chain message; the menu no longer uses it).
+
+### Steps
+1. `menu.h`/`menu.cpp`: model, `MenuBarDefault`, `MenuInvoke`,
+   `MenuState`, `PlatformMenuHooks`.
+2. `frame_input.h`: `+bool fullscreen`.
+3. `renderer_metal.*`: `RendererSetContentSize` -> `RendererSetContentRect`;
+   origin `MTLViewport` on the final pass, `(0,0,w,h)` on intermediates.
+4. `ui.*`: strip + dropdown render/interaction, `menuHasPointer` input
+   swallow; `UiBuildFrame(ui, input, showMenuBarPref)`; `UiTakeMenuAction`;
+   `UiContentOriginX/Y`; content height minus strip; layout cursor starts
+   below the strip.
+5. `app.*`: `AppState{+MenuState, +PlatformMenuHooks}`; `Init(..., hooks)`;
+   `AppDispatchMenuAction`; `AppMenuState`; `FrameUpdate` dispatches
+   `UiTakeMenuAction`; `FrameRender` passes the content rect.
+6. `platform_macos.mm`: `InstallMainMenu` from `MenuBarDefault()` with a
+   unified `-dispatchMenuAction:` + tag; hook trampolines; `-validateMenuItem:`
+   for the toggle item; `frameInput.fullscreen`.
+7. `Makefile`: `+src/menu.cpp`.
+8. `make run`; verify (below).
+9. Update this section and `CLAUDE.md`.
+
+### Verify
+- Windowed: native menu bar still works (Import, Toggle Full Screen, Quit)
+  through the new dispatch; no in-app strip until View > Toggle Menu Bar.
+- Toggle Menu Bar windowed: strip shows/hides at the top and the viewport
+  grows/shrinks to match.
+- Fullscreen (Cmd-F): strip forced on at the top, viewport sits below it, 3
+  cubes + right panel still render; File > Import File... opens the panel;
+  View > Toggle Full Screen exits; Toggle Menu Bar is greyed and inert.
+- No Metal validation errors.

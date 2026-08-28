@@ -50,6 +50,9 @@ constexpr float kMouseWheelZoom = 0.05f;
 @property(nonatomic) BOOL pendingCycleDebug;
 @property(nonatomic) BOOL pendingToggleFxaa;
 @property(nonatomic) BOOL pendingToggleHud;
+@property(nonatomic) float pendingMouseX; // backing pixels, top-left origin
+@property(nonatomic) float pendingMouseY;
+@property(nonatomic) BOOL pendingMouseDown; // left button held
 @property(nonatomic) BOOL inFullscreen; // kept in sync by AppDelegate
 @property(nonatomic, copy) void (^onToggleFullscreen)(void);
 @end
@@ -115,6 +118,47 @@ constexpr float kMouseWheelZoom = 0.05f;
 
 - (void)otherMouseDown:(NSEvent *)event {
     (void)event;
+}
+
+// The UI reads an absolute cursor position in backing pixels with a top-left
+// origin, matching the drawable. convertPointToBacking: yields bottom-left
+// pixels, so flip Y against the drawable height.
+- (void)trackMouse:(NSEvent *)event {
+    NSPoint inView = [self convertPoint:event.locationInWindow fromView:nil];
+    NSPoint inBacking = [self convertPointToBacking:inView];
+    self.pendingMouseX = (float)inBacking.x;
+    self.pendingMouseY = (float)(self.drawableSize.height - inBacking.y);
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    [self trackMouse:event];
+    self.pendingMouseDown = YES;
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    [self trackMouse:event];
+    self.pendingMouseDown = NO;
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    [self trackMouse:event];
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    [self trackMouse:event];
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *area in [self.trackingAreas copy]) {
+        [self removeTrackingArea:area];
+    }
+    NSTrackingArea *area = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+             options:NSTrackingMouseMoved | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect
+               owner:self
+            userInfo:nil];
+    [self addTrackingArea:area];
 }
 
 - (void)rightMouseDragged:(NSEvent *)event {
@@ -269,7 +313,7 @@ constexpr float kMouseWheelZoom = 0.05f;
     self.lastTime = now;
 
     AppMetalView *metalView = self.metalView;
-    CameraInput cameraInput = {
+    FrameInput frameInput = {
         .panX = metalView.pendingPanX,
         .panY = metalView.pendingPanY,
         .zoomDelta = metalView.pendingZoom,
@@ -277,6 +321,10 @@ constexpr float kMouseWheelZoom = 0.05f;
         .orbitPitch = metalView.pendingOrbitPitch,
         .cycleDebugView = (bool)metalView.pendingCycleDebug,
         .toggleFxaa = (bool)metalView.pendingToggleFxaa,
+        .mouseX = metalView.pendingMouseX,
+        .mouseY = metalView.pendingMouseY,
+        .mouseDown = (bool)metalView.pendingMouseDown,
+        .fullscreen = (bool)metalView.inFullscreen,
     };
     metalView.pendingPanX = 0.0f;
     metalView.pendingPanY = 0.0f;
@@ -294,7 +342,7 @@ constexpr float kMouseWheelZoom = 0.05f;
         [self.hudView pushFrameTime:deltaTime];
     }
 
-    FrameUpdate(self.arena, deltaTime, cameraInput);
+    FrameUpdate(self.arena, deltaTime, frameInput);
 
     if (drawable == nil) {
         return;
@@ -314,7 +362,7 @@ constexpr float kMouseWheelZoom = 0.05f;
 @end
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate,
-                                   CAMetalDisplayLinkDelegate> {
+                                   CAMetalDisplayLinkDelegate, NSMenuItemValidation> {
     Arena _arena;
     void *_arenaMemory;
 }
@@ -326,7 +374,22 @@ constexpr float kMouseWheelZoom = 0.05f;
 @property(nonatomic) BOOL borderlessFullscreen;
 @property(nonatomic) NSRect windowedFrame;
 @property(nonatomic) NSWindowStyleMask windowedStyleMask;
+- (void)toggleBorderlessFullscreen;
+- (void)importBlendFile:(id)sender;
 @end
+
+// Trampolines so portable menu dispatch can trigger the AppKit-only actions
+// through PlatformMenuHooks function pointers.
+static void MenuHookImportFile(void *context) {
+    [(__bridge AppDelegate *)context importBlendFile:nil];
+}
+static void MenuHookToggleFullscreen(void *context) {
+    [(__bridge AppDelegate *)context toggleBorderlessFullscreen];
+}
+static void MenuHookQuit(void *context) {
+    (void)context;
+    [NSApp terminate:nil];
+}
 
 @implementation AppDelegate
 
@@ -347,6 +410,7 @@ constexpr float kMouseWheelZoom = 0.05f;
                                                  backing:NSBackingStoreBuffered
                                                    defer:NO];
     [self.window setTitle:@"Renderer"];
+    [self.window setAcceptsMouseMovedEvents:YES];
     [self.window center];
     // AppKit's own fullscreen throttles CAMetalDisplayLink to 120 Hz; disable
     // it so the green button zooms and our borderless fullscreen is the only
@@ -359,8 +423,14 @@ constexpr float kMouseWheelZoom = 0.05f;
     self.view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
 
     CGSize drawableSize = self.view.drawableSize;
+    PlatformMenuHooks menuHooks = {
+        .importFile = MenuHookImportFile,
+        .toggleFullscreen = MenuHookToggleFullscreen,
+        .quit = MenuHookQuit,
+        .context = (__bridge void *)self,
+    };
     Init(&_arena, device, self.view.colorPixelFormat, kDepthFormat, (float)drawableSize.width,
-         (float)drawableSize.height);
+         (float)drawableSize.height, menuHooks);
 
     self.hudView = [[DebugHudView alloc] initWithFrame:self.view.bounds];
     self.hudView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -495,50 +565,61 @@ constexpr float kMouseWheelZoom = 0.05f;
     }];
 }
 
+// Every native menu item carries its MenuAction in its tag and routes here,
+// through the same dispatch the in-app menu strip uses.
+- (void)dispatchMenuAction:(NSMenuItem *)sender {
+    if (_arenaMemory == NULL) {
+        return;
+    }
+    AppDispatchMenuAction(&_arena, (MenuAction)sender.tag);
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (_arenaMemory == NULL) {
+        return YES;
+    }
+    if (item.tag == MenuAction_ToggleMenuBar) {
+        item.state = AppMenuState(&_arena).showMenuBar ? NSControlStateValueOn : NSControlStateValueOff;
+        return !self.borderlessFullscreen;
+    }
+    return YES;
+}
+
 @end
 
 namespace {
 
+// Build the real menu bar from the portable model. menus[0] is shown by
+// macOS as the application menu (its title is replaced with the app name).
 void InstallMainMenu(AppDelegate *delegate) {
+    MenuBar model = MenuBarDefault();
     NSMenu *menuBar = [[NSMenu alloc] init];
-    NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
-    [menuBar addItem:appMenuItem];
 
-    NSMenuItem *fileMenuItem = [[NSMenuItem alloc] initWithTitle:@"File"
-                                                            action:nil
-                                                     keyEquivalent:@""];
-    [menuBar addItem:fileMenuItem];
+    for (int i = 0; i < model.menuCount; ++i) {
+        NSMenuItem *containerItem = [[NSMenuItem alloc] init];
+        [menuBar addItem:containerItem];
 
-    NSMenuItem *viewMenuItem = [[NSMenuItem alloc] initWithTitle:@"View"
-                                                          action:nil
-                                                   keyEquivalent:@""];
-    [menuBar addItem:viewMenuItem];
+        NSMenu *submenu =
+            [[NSMenu alloc] initWithTitle:[NSString stringWithUTF8String:model.menus[i].title]];
+        [containerItem setSubmenu:submenu];
+
+        for (int j = 0; j < model.menus[i].itemCount; ++j) {
+            MenuItem modelItem = model.menus[i].items[j];
+            NSString *key = (modelItem.shortcut && modelItem.shortcut[0] != '\0')
+                                ? [NSString stringWithUTF8String:modelItem.shortcut]
+                                : @"";
+            NSMenuItem *nsItem =
+                [[NSMenuItem alloc] initWithTitle:[NSString stringWithUTF8String:modelItem.label]
+                                          action:@selector(dispatchMenuAction:)
+                                   keyEquivalent:key];
+            nsItem.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+            nsItem.target = delegate;
+            nsItem.tag = modelItem.action;
+            [submenu addItem:nsItem];
+        }
+    }
 
     [NSApp setMainMenu:menuBar];
-
-    NSMenu *appMenu = [[NSMenu alloc] init];
-    NSString *quitTitle = [@"Quit " stringByAppendingString:[[NSProcessInfo processInfo] processName]];
-    NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:quitTitle
-                                                       action:@selector(terminate:)
-                                                keyEquivalent:@"q"];
-    [appMenu addItem:quitItem];
-    [appMenuItem setSubmenu:appMenu];
-
-    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
-    NSMenuItem *importItem = [[NSMenuItem alloc] initWithTitle:@"Import File…"
-                                                          action:@selector(importBlendFile:)
-                                                   keyEquivalent:@""];
-    [importItem setTarget:delegate];
-    [fileMenu addItem:importItem];
-    [fileMenuItem setSubmenu:fileMenu];
-
-    NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
-    NSMenuItem *fullscreenItem = [[NSMenuItem alloc] initWithTitle:@"Toggle Full Screen"
-                                                            action:@selector(toggleFullScreen:)
-                                                     keyEquivalent:@"f"];
-    fullscreenItem.keyEquivalentModifierMask = NSEventModifierFlagCommand;
-    [viewMenu addItem:fullscreenItem];
-    [viewMenuItem setSubmenu:viewMenu];
 }
 
 } // namespace
