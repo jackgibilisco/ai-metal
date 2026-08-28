@@ -1,7 +1,11 @@
 #include "ui_render_metal.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
+
+#include "third_party/font8x8_basic.h"
 
 namespace {
 
@@ -35,19 +39,67 @@ vertex UiVertexOut ui_vertex(UiVertexIn in [[stage_in]],
     return out;
 }
 
-fragment float4 ui_fragment(UiVertexOut in [[stage_in]]) {
-    return in.color;
+fragment float4 ui_fragment(UiVertexOut in [[stage_in]],
+                            texture2d<float> fontAtlas [[texture(0)]]) {
+    constexpr sampler glyphSampler(filter::nearest, address::clamp_to_edge);
+    float4 color = in.color;
+    if (in.mode > 0.5) {
+        color.a *= fontAtlas.sample(glyphSampler, in.uv).r;
+    }
+    return color;
 }
 )";
 
 constexpr int kMaxUiVertices = 65536;
+
+// Glyph atlas layout. ui.cpp mirrors kFontFirstChar / kFontCharCount to place
+// text quads; a glyph's cell is column (codepoint - kFontFirstChar) of an
+// kFontCharCount-wide, one-row grid of 8x8 cells.
+constexpr int kFontFirstChar = 32;
+constexpr int kFontCharCount = 96;
+constexpr int kGlyphSize = 8;
 
 } // namespace
 
 struct UiRenderState {
     id<MTLRenderPipelineState> pipeline;
     id<MTLBuffer> vertexBuffer;
+    id<MTLTexture> fontAtlas;
 };
+
+namespace {
+
+id<MTLTexture> BuildFontAtlas(id<MTLDevice> device) {
+    int atlasWidth = kFontCharCount * kGlyphSize;
+    int atlasHeight = kGlyphSize;
+    uint8_t *pixels = (uint8_t *)calloc((size_t)atlasWidth * atlasHeight, 1);
+    for (int glyph = 0; glyph < kFontCharCount; ++glyph) {
+        const unsigned char *rows = font8x8_basic[kFontFirstChar + glyph];
+        for (int row = 0; row < kGlyphSize; ++row) {
+            for (int col = 0; col < kGlyphSize; ++col) {
+                if (rows[row] & (1 << col)) {
+                    pixels[row * atlasWidth + glyph * kGlyphSize + col] = 255;
+                }
+            }
+        }
+    }
+
+    MTLTextureDescriptor *descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                                          width:atlasWidth
+                                                         height:atlasHeight
+                                                      mipmapped:NO];
+    descriptor.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> atlas = [device newTextureWithDescriptor:descriptor];
+    [atlas replaceRegion:MTLRegionMake2D(0, 0, atlasWidth, atlasHeight)
+             mipmapLevel:0
+               withBytes:pixels
+             bytesPerRow:atlasWidth];
+    free(pixels);
+    return atlas;
+}
+
+} // namespace
 
 UiRenderState *UiRenderInit(Arena *arena, id<MTLDevice> device, MTLPixelFormat colorFormat) {
     UiRenderState *state = ArenaPushStruct(arena, UiRenderState);
@@ -97,6 +149,7 @@ UiRenderState *UiRenderInit(Arena *arena, id<MTLDevice> device, MTLPixelFormat c
 
     state->vertexBuffer = [device newBufferWithLength:kMaxUiVertices * sizeof(UiVertex)
                                              options:MTLResourceStorageModeShared];
+    state->fontAtlas = BuildFontAtlas(device);
     return state;
 }
 
@@ -122,6 +175,7 @@ void UiRenderEncode(UiRenderState *uiRender, RenderTarget target, const UiVertex
     [encoder setRenderPipelineState:uiRender->pipeline];
     [encoder setVertexBuffer:uiRender->vertexBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:inverseScreenSize length:sizeof(inverseScreenSize) atIndex:1];
+    [encoder setFragmentTexture:uiRender->fontAtlas atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vertexCount];
     [encoder endEncoding];
 }

@@ -674,3 +674,47 @@ frames while the scene is static and no UI interaction is happening.
 - Pausing the display link on idle (not just skipping the render) — would
   need every input path to wake it. Left running per the "FrameUpdate every
   tick" contract.
+
+## Feature: glyph-atlas text (replaces stb_easy_font)
+
+### Problem
+`stb_easy_font` renders text as blocky untextured vector quads, is
+ASCII-only with an out-of-bounds trap on any codepoint outside 32..126, and
+has no path to sizes/atlas without a rewrite. Recommendation #5 from the
+architecture review.
+
+### Approach
+- Vendor `src/third_party/font8x8_basic.h` — Daniel Hepper's public-domain
+  8x8 bitmap font (derived from the public-domain IBM VGA fonts), covering
+  U+0000..U+007F. Vendored change: the array is made
+  `static const unsigned char` so the header can be `#included` without a
+  multiple-definition / signedness issue.
+- `ui_render_metal.mm` unpacks ASCII 32..127 into one `MTLPixelFormatR8Unorm`
+  atlas texture at init: a `kFontCharCount`-wide, one-row grid of 8x8 cells,
+  bit set -> 255. Stored as `UiRenderState.fontAtlas` (arena-resident; the
+  calloc-zeroed arena makes the first `id` assignment safe, same as the
+  pipeline/vertexBuffer fields).
+- The UI shader gains a texture binding; `mode > 0.5` multiplies the
+  fragment alpha by the nearest-sampled atlas red channel, `mode == 0` is
+  the unchanged solid path.
+- `ui.cpp`: `PushText` emits one `mode = 1` quad per character with uv into
+  that glyph's cell, advancing `8 * kTextScale` px each. `TextWidth` is
+  `strlen * 8 * kTextScale` (monospace). Codepoints outside the atlas
+  advance but draw nothing. `stb_easy_font.h` and its `#pragma` wrapper are
+  deleted.
+- `kGlyphHeight` becomes 8 (the cell height) so button / menu-row vertical
+  centering stays correct.
+
+### Trade
+Crisp nearest-sampled bitmap text (classic 8x8 VGA look), wider advance
+than the old font so labels take more width — everything still fits the
+260px panel and the menu strip. A proportional / SDF font is a later swap;
+the `UiVertex` uv+mode channels and the shader branch already support it.
+
+### Verify
+- `make` clean, no new warnings; run with `MTL_DEBUG_LAYER=1
+  MTL_SHADER_VALIDATION=1`, no validation errors.
+- Windowed: "Button A/B", "Reset", "Speed"/"Zoom" + `0.50`/`0.35` readouts
+  render as clean readable glyphs, centered/positioned as before.
+- Fullscreen: "Renderer"/"File"/"View" strip titles render in the new font;
+  3 cubes + panel unaffected.

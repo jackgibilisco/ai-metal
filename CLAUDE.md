@@ -102,9 +102,12 @@ Layers, each with a different portability contract:
   (`UiContentOriginX/Y`, `UiContentWidth/Height` — drawable minus panel and
   strip), any clicked `MenuAction` (`UiTakeMenuAction`), and whether it owns
   the pointer/keyboard this frame (`UiWantsMouse` / `UiWantsKeyboard`).
-  `PushVertex` asserts on overflow of the 65536-vertex buffer. Text is
-  solid-color quads via the vendored, ASCII-only
-  `src/third_party/stb_easy_font.h`.
+  `PushVertex` asserts on overflow of the 65536-vertex buffer. Text is one
+  textured quad per character (`mode` 1, uv into the glyph atlas); the
+  monospace 8x8 cell means `TextWidth` is just `strlen * 8 * scale`, no
+  measurement pass. The atlas is built once in `ui_render_metal.mm` from the
+  vendored public-domain `src/third_party/font8x8_basic.h` (ASCII 32..126);
+  `ui.cpp` mirrors `kFontFirstChar`/`kFontCharCount` to place the cells.
 - **`src/menu.h`/`.cpp`** — pure C++ menu model: the `MenuAction` enum, the
   `MenuBar` layout (`MenuBarDefault`), `MenuState` (the Show Menu Bar
   preference), and `MenuInvoke`, which mutates `MenuState` for app-level
@@ -112,10 +115,12 @@ Layers, each with a different portability contract:
   struct for the platform-only ones (import file, toggle fullscreen, quit).
   Both the native `NSMenu` and the in-app strip are built from this model
   and dispatch through `MenuInvoke`.
-- **`src/ui_render_metal.h`/`.mm`** — Metal backend for the UI: a
-  solid-color pipeline, a per-frame vertex buffer, and one alpha-blended
-  Load-action pass drawn on top of the drawable after the scene. A Windows
-  port adds a sibling `ui_render_d3d.*` and reuses `ui.cpp` unchanged.
+- **`src/ui_render_metal.h`/`.mm`** — Metal backend for the UI: one pipeline
+  (fragment branches on `mode` — solid color, or color with alpha from the
+  R8 glyph atlas), the glyph atlas texture, a per-frame vertex buffer, and
+  one alpha-blended Load-action pass drawn on top of the drawable after the
+  scene. A Windows port adds a sibling `ui_render_d3d.*` and reuses `ui.cpp`
+  unchanged.
 - **`src/renderer_metal.h`/`.mm`** — Metal-specific but OS-agnostic: it never
   touches AppKit/UIKit, only the Metal API. Owns `RendererState` (device, the
   four pipelines — geometry, AO, lighting, FXAA — depth state,
@@ -221,8 +226,9 @@ uninitialized garbage instead of `nil`, this crashes. That's why the arena's
 backing memory is obtained with `calloc`, not `malloc`
 (`src/platform_macos.mm`): zeroing guarantees every `id` field starts as
 `nil` before its first assignment. `UiRenderState` (pipeline + vertex
-buffer) is a second such struct pushed into the arena and relies on the
-same zeroing; any further Metal-object-holding arena struct must too.
+buffer + glyph atlas texture) is a second such struct pushed into the arena
+and relies on the same zeroing; any further Metal-object-holding arena
+struct must too.
 
 The SSAO screen targets are assigned more than once (every drawable
 resize). That is safe for the same reason: each field holds either `nil` or

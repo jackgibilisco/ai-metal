@@ -3,11 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-function"
-#include "third_party/stb_easy_font.h"
-#pragma clang diagnostic pop
+#include <cstring>
 
 namespace {
 
@@ -22,7 +18,13 @@ constexpr float kRowGap = 9.0f;
 constexpr float kButtonHeight = 30.0f;
 constexpr float kSliderHeight = 46.0f;
 constexpr float kTextScale = 2.0f;
-constexpr float kGlyphHeight = 7.0f;
+constexpr float kGlyphPixels = 8.0f; // font cell is 8x8; advance and line height
+constexpr float kGlyphHeight = kGlyphPixels;
+
+// Must match the atlas built in ui_render_metal.mm: glyph `c` occupies cell
+// (c - kFontFirstChar) of a kFontCharCount-wide row.
+constexpr int kFontFirstChar = 32;
+constexpr int kFontCharCount = 96;
 
 constexpr float kMenuBarHeight = 32.0f;
 constexpr float kMenuTitlePadX = 12.0f;
@@ -95,18 +97,22 @@ struct UiState {
 
 namespace {
 
-void PushVertex(UiState *ui, float x, float y, Color c) {
+void PushVertexUV(UiState *ui, float x, float y, float u, float v, float mode, Color c) {
     assert(ui->vertexCount < kMaxVertices);
-    UiVertex &v = ui->vertices[ui->vertexCount++];
-    v.x = x;
-    v.y = y;
-    v.u = 0.0f;
-    v.v = 0.0f;
-    v.mode = 0.0f;
-    v.rgba[0] = c.r;
-    v.rgba[1] = c.g;
-    v.rgba[2] = c.b;
-    v.rgba[3] = c.a;
+    UiVertex &vert = ui->vertices[ui->vertexCount++];
+    vert.x = x;
+    vert.y = y;
+    vert.u = u;
+    vert.v = v;
+    vert.mode = mode;
+    vert.rgba[0] = c.r;
+    vert.rgba[1] = c.g;
+    vert.rgba[2] = c.b;
+    vert.rgba[3] = c.a;
+}
+
+void PushVertex(UiState *ui, float x, float y, Color c) {
+    PushVertexUV(ui, x, y, 0.0f, 0.0f, 0.0f, c);
 }
 
 void PushQuad(UiState *ui, float x0, float y0, float x1, float y1, float x2, float y2, float x3,
@@ -123,29 +129,33 @@ void PushRect(UiState *ui, Rect r, Color c) {
     PushQuad(ui, r.x, r.y, r.x + r.w, r.y, r.x + r.w, r.y + r.h, r.x, r.y + r.h, c);
 }
 
-void PushText(UiState *ui, float x, float y, const char *text, Color c) {
-    static char quadBuffer[16384];
-    unsigned char color[4] = {c.r, c.g, c.b, c.a};
-    int quadCount =
-        stb_easy_font_print(0.0f, 0.0f, (char *)text, color, quadBuffer, sizeof(quadBuffer));
+void PushGlyph(UiState *ui, float x, float y, float u0, float u1, Color c) {
+    float x1 = x + kGlyphPixels * kTextScale;
+    float y1 = y + kGlyphPixels * kTextScale;
+    PushVertexUV(ui, x, y, u0, 0.0f, 1.0f, c);
+    PushVertexUV(ui, x1, y, u1, 0.0f, 1.0f, c);
+    PushVertexUV(ui, x1, y1, u1, 1.0f, 1.0f, c);
+    PushVertexUV(ui, x, y, u0, 0.0f, 1.0f, c);
+    PushVertexUV(ui, x1, y1, u1, 1.0f, 1.0f, c);
+    PushVertexUV(ui, x, y1, u0, 1.0f, 1.0f, c);
+}
 
-    const char *cursor = quadBuffer;
-    for (int q = 0; q < quadCount; ++q) {
-        float px[4];
-        float py[4];
-        for (int i = 0; i < 4; ++i) {
-            float vx = *(const float *)(cursor + 0);
-            float vy = *(const float *)(cursor + 4);
-            px[i] = x + vx * kTextScale;
-            py[i] = y + vy * kTextScale;
-            cursor += 16;
+void PushText(UiState *ui, float x, float y, const char *text, Color c) {
+    float penX = x;
+    for (const unsigned char *p = (const unsigned char *)text; *p != '\0'; ++p) {
+        int codepoint = *p;
+        if (codepoint >= kFontFirstChar && codepoint < kFontFirstChar + kFontCharCount) {
+            int cell = codepoint - kFontFirstChar;
+            float u0 = (float)cell / (float)kFontCharCount;
+            float u1 = (float)(cell + 1) / (float)kFontCharCount;
+            PushGlyph(ui, penX, y, u0, u1, c);
         }
-        PushQuad(ui, px[0], py[0], px[1], py[1], px[2], py[2], px[3], py[3], c);
+        penX += kGlyphPixels * kTextScale;
     }
 }
 
 float TextWidth(const char *text) {
-    return (float)stb_easy_font_width((char *)text) * kTextScale;
+    return (float)strlen(text) * kGlyphPixels * kTextScale;
 }
 
 bool Button(UiState *ui, int id, Rect r, const char *label) {
