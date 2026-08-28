@@ -1,5 +1,6 @@
 #include "ui.h"
 
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 
@@ -30,7 +31,7 @@ constexpr float kMenuDropdownPadX = 14.0f;
 constexpr float kMenuDropdownMinWidth = 170.0f;
 constexpr float kMenuShortcutColumn = 64.0f;
 
-constexpr int kMaxVertices = 16384;
+constexpr int kMaxVertices = 65536;
 
 struct Color {
     unsigned char r, g, b, a;
@@ -88,8 +89,6 @@ struct UiState {
     bool mousePressed;
     bool mouseReleased;
 
-    float sliderValue[2];
-
     UiVertex vertices[kMaxVertices];
     int vertexCount;
 };
@@ -97,12 +96,13 @@ struct UiState {
 namespace {
 
 void PushVertex(UiState *ui, float x, float y, Color c) {
-    if (ui->vertexCount >= kMaxVertices) {
-        return;
-    }
+    assert(ui->vertexCount < kMaxVertices);
     UiVertex &v = ui->vertices[ui->vertexCount++];
     v.x = x;
     v.y = y;
+    v.u = 0.0f;
+    v.v = 0.0f;
+    v.mode = 0.0f;
     v.rgba[0] = c.r;
     v.rgba[1] = c.g;
     v.rgba[2] = c.b;
@@ -336,8 +336,6 @@ UiState *UiInit(Arena *arena, float drawableWidth, float drawableHeight) {
     ui->drawableHeight = drawableHeight;
     ui->panelWidth = kPanelStartWidth;
     ui->contentWidth = drawableWidth - kPanelStartWidth - kSplitterWidth;
-    ui->sliderValue[0] = 0.5f;
-    ui->sliderValue[1] = 0.35f;
     ui->menuBar = MenuBarDefault();
     ui->openMenu = -1;
     return ui;
@@ -358,13 +356,13 @@ void UiHandleResize(UiState *ui, float drawableWidth, float drawableHeight) {
     }
 }
 
-void UiBuildFrame(UiState *ui, FrameInput input, bool showMenuBarPref) {
+void UiBuildFrame(UiState *ui, FrameInput input, bool showMenuBarPref, UiDemoState *demo) {
     ui->vertexCount = 0;
     ui->mouseX = input.mouseX;
     ui->mouseY = input.mouseY;
-    ui->mouseDown = input.mouseDown;
-    ui->mousePressed = input.mouseDown && !ui->prevMouseDown;
-    ui->mouseReleased = !input.mouseDown && ui->prevMouseDown;
+    ui->mouseDown = input.mouseLeftDown;
+    ui->mousePressed = input.mouseLeftDown && !ui->prevMouseDown;
+    ui->mouseReleased = !input.mouseLeftDown && ui->prevMouseDown;
     ui->hotId = 0;
 
     ui->menuBarVisible = input.fullscreen || showMenuBarPref;
@@ -423,9 +421,9 @@ void UiBuildFrame(UiState *ui, FrameInput input, bool showMenuBarPref) {
     Button(ui, 3, {widgetX, cursorY, widgetW, kButtonHeight}, "Reset");
     cursorY += kButtonHeight + kRowGap * 2.0f;
 
-    Slider(ui, 10, {widgetX, cursorY, widgetW, kSliderHeight}, "Speed", &ui->sliderValue[0]);
+    Slider(ui, 10, {widgetX, cursorY, widgetW, kSliderHeight}, "Speed", &demo->speed);
     cursorY += kSliderHeight + kRowGap;
-    Slider(ui, 11, {widgetX, cursorY, widgetW, kSliderHeight}, "Zoom", &ui->sliderValue[1]);
+    Slider(ui, 11, {widgetX, cursorY, widgetW, kSliderHeight}, "Zoom", &demo->zoom);
 
     MenuDraw(ui, input.fullscreen);
 
@@ -439,6 +437,16 @@ MenuAction UiTakeMenuAction(UiState *ui) {
     MenuAction action = ui->pendingMenuAction;
     ui->pendingMenuAction = MenuAction_None;
     return action;
+}
+
+bool UiWantsMouse(const UiState *ui) {
+    bool overPanel = ui->mouseX >= ui->contentWidth;
+    bool dragging = ui->draggingSplitter || ui->activeId != 0;
+    return overPanel || ui->menuHasPointer || dragging || ui->openMenu >= 0;
+}
+
+bool UiWantsKeyboard(const UiState *ui) {
+    return ui->openMenu >= 0;
 }
 
 float UiContentOriginX(const UiState *ui) {

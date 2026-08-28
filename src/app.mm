@@ -13,6 +13,7 @@ struct AppState {
     RendererState *renderer;
     UiState *ui;
     UiRenderState *uiRender;
+    UiDemoState demo;
     MenuState menu;
     PlatformMenuHooks menuHooks;
 };
@@ -28,20 +29,29 @@ void Init(Arena *arena, id<MTLDevice> device, MTLPixelFormat colorFormat,
         RendererInit(arena, device, colorFormat, depthFormat, drawableWidth, drawableHeight);
     appState->ui = UiInit(arena, drawableWidth, drawableHeight);
     appState->uiRender = UiRenderInit(arena, device, colorFormat);
+    appState->demo = {0.5f, 0.35f};
     appState->menuHooks = menuHooks;
 }
 
 void FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     AppState *appState = (AppState *)arena->base;
     GameUpdate(appState->game, deltaTime);
-    UiBuildFrame(appState->ui, input, appState->menu.showMenuBar);
+    UiBuildFrame(appState->ui, input, appState->menu.showMenuBar, &appState->demo);
 
     MenuAction menuAction = UiTakeMenuAction(appState->ui);
     if (menuAction != MenuAction_None) {
         MenuInvoke(menuAction, &appState->menu, appState->menuHooks);
     }
 
-    RendererUpdateCamera(appState->renderer, input);
+    FrameInput cameraInput = input;
+    if (UiWantsMouse(appState->ui)) {
+        cameraInput.panX = 0.0f;
+        cameraInput.panY = 0.0f;
+        cameraInput.zoomDelta = 0.0f;
+        cameraInput.orbitYaw = 0.0f;
+        cameraInput.orbitPitch = 0.0f;
+    }
+    RendererUpdateCamera(appState->renderer, cameraInput);
 }
 
 void FrameRender(Arena *arena, RenderTarget target) {

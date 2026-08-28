@@ -12,11 +12,15 @@ using namespace metal;
 struct UiVertexIn {
     float2 position [[attribute(0)]];
     uchar4 color [[attribute(1)]];
+    float2 uv [[attribute(2)]];
+    float mode [[attribute(3)]];
 };
 
 struct UiVertexOut {
     float4 position [[position]];
     float4 color;
+    float2 uv;
+    float mode;
 };
 
 vertex UiVertexOut ui_vertex(UiVertexIn in [[stage_in]],
@@ -26,6 +30,8 @@ vertex UiVertexOut ui_vertex(UiVertexIn in [[stage_in]],
                         1.0 - in.position.y * inverseScreenSize.y * 2.0);
     out.position = float4(ndc, 0.0, 1.0);
     out.color = float4(in.color) / 255.0;
+    out.uv = in.uv;
+    out.mode = in.mode;
     return out;
 }
 
@@ -34,7 +40,7 @@ fragment float4 ui_fragment(UiVertexOut in [[stage_in]]) {
 }
 )";
 
-constexpr int kMaxUiVertices = 16384;
+constexpr int kMaxUiVertices = 65536;
 
 } // namespace
 
@@ -63,6 +69,12 @@ UiRenderState *UiRenderInit(Arena *arena, id<MTLDevice> device, MTLPixelFormat c
     vertexDescriptor.attributes[1].format = MTLVertexFormatUChar4;
     vertexDescriptor.attributes[1].offset = offsetof(UiVertex, rgba);
     vertexDescriptor.attributes[1].bufferIndex = 0;
+    vertexDescriptor.attributes[2].format = MTLVertexFormatFloat2;
+    vertexDescriptor.attributes[2].offset = offsetof(UiVertex, u);
+    vertexDescriptor.attributes[2].bufferIndex = 0;
+    vertexDescriptor.attributes[3].format = MTLVertexFormatFloat;
+    vertexDescriptor.attributes[3].offset = offsetof(UiVertex, mode);
+    vertexDescriptor.attributes[3].bufferIndex = 0;
     vertexDescriptor.layouts[0].stride = sizeof(UiVertex);
 
     MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];

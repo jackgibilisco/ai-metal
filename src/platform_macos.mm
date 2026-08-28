@@ -52,15 +52,46 @@ constexpr float kMouseWheelZoom = 0.05f;
 @property(nonatomic) BOOL pendingToggleHud;
 @property(nonatomic) float pendingMouseX; // backing pixels, top-left origin
 @property(nonatomic) float pendingMouseY;
-@property(nonatomic) BOOL pendingMouseDown; // left button held
+@property(nonatomic) BOOL pendingMouseLeftDown;
+@property(nonatomic) BOOL pendingMouseRightDown;
+@property(nonatomic) BOOL pendingMouseMiddleDown;
+@property(nonatomic) float pendingScrollX; // UI scroll, separate from camera pan/zoom
+@property(nonatomic) float pendingScrollY;
+@property(nonatomic) BOOL pendingShift;
+@property(nonatomic) BOOL pendingCtrl;
+@property(nonatomic) BOOL pendingAlt;
+@property(nonatomic) BOOL pendingCmd;
 @property(nonatomic) BOOL inFullscreen; // kept in sync by AppDelegate
 @property(nonatomic, copy) void (^onToggleFullscreen)(void);
+- (int)drainKeyEventsInto:(KeyEvent *)dest max:(int)max;
 @end
 
-@implementation AppMetalView
+@implementation AppMetalView {
+    KeyEvent _pendingKeyEvents[kMaxKeyEvents];
+    int _pendingKeyEventCount;
+}
 
 - (BOOL)acceptsFirstResponder {
     return YES;
+}
+
+- (void)enqueueKey:(NSEvent *)event pressed:(BOOL)pressed {
+    if (_pendingKeyEventCount >= kMaxKeyEvents) {
+        return;
+    }
+    NSString *chars = event.charactersIgnoringModifiers;
+    unsigned int codepoint = chars.length > 0 ? [chars characterAtIndex:0] : 0;
+    _pendingKeyEvents[_pendingKeyEventCount++] =
+        (KeyEvent){(int)event.keyCode, codepoint, (bool)pressed};
+}
+
+- (int)drainKeyEventsInto:(KeyEvent *)dest max:(int)max {
+    int count = _pendingKeyEventCount < max ? _pendingKeyEventCount : max;
+    for (int i = 0; i < count; ++i) {
+        dest[i] = _pendingKeyEvents[i];
+    }
+    _pendingKeyEventCount = 0;
+    return count;
 }
 
 // Intercepts the View menu's Cmd-F item and any programmatic -toggleFullScreen:,
@@ -74,6 +105,7 @@ constexpr float kMouseWheelZoom = 0.05f;
 }
 
 - (void)keyDown:(NSEvent *)event {
+    [self enqueueKey:event pressed:YES];
     if ([event.charactersIgnoringModifiers isEqualToString:@"o"]) {
         self.pendingCycleDebug = YES;
         return;
@@ -93,7 +125,24 @@ constexpr float kMouseWheelZoom = 0.05f;
     [super keyDown:event];
 }
 
+- (void)keyUp:(NSEvent *)event {
+    [self enqueueKey:event pressed:NO];
+    [super keyUp:event];
+}
+
+- (void)flagsChanged:(NSEvent *)event {
+    NSEventModifierFlags flags = event.modifierFlags;
+    self.pendingShift = (flags & NSEventModifierFlagShift) != 0;
+    self.pendingCtrl = (flags & NSEventModifierFlagControl) != 0;
+    self.pendingAlt = (flags & NSEventModifierFlagOption) != 0;
+    self.pendingCmd = (flags & NSEventModifierFlagCommand) != 0;
+    [super flagsChanged:event];
+}
+
 - (void)scrollWheel:(NSEvent *)event {
+    self.pendingScrollX += (float)event.scrollingDeltaX;
+    self.pendingScrollY += (float)event.scrollingDeltaY;
+
     if (!event.hasPreciseScrollingDeltas) {
         self.pendingZoom += (float)event.scrollingDeltaY * kMouseWheelZoom;
         return;
@@ -113,11 +162,23 @@ constexpr float kMouseWheelZoom = 0.05f;
 }
 
 - (void)rightMouseDown:(NSEvent *)event {
-    (void)event;
+    [self trackMouse:event];
+    self.pendingMouseRightDown = YES;
+}
+
+- (void)rightMouseUp:(NSEvent *)event {
+    [self trackMouse:event];
+    self.pendingMouseRightDown = NO;
 }
 
 - (void)otherMouseDown:(NSEvent *)event {
-    (void)event;
+    [self trackMouse:event];
+    self.pendingMouseMiddleDown = YES;
+}
+
+- (void)otherMouseUp:(NSEvent *)event {
+    [self trackMouse:event];
+    self.pendingMouseMiddleDown = NO;
 }
 
 // The UI reads an absolute cursor position in backing pixels with a top-left
@@ -132,12 +193,12 @@ constexpr float kMouseWheelZoom = 0.05f;
 
 - (void)mouseDown:(NSEvent *)event {
     [self trackMouse:event];
-    self.pendingMouseDown = YES;
+    self.pendingMouseLeftDown = YES;
 }
 
 - (void)mouseUp:(NSEvent *)event {
     [self trackMouse:event];
-    self.pendingMouseDown = NO;
+    self.pendingMouseLeftDown = NO;
 }
 
 - (void)mouseDragged:(NSEvent *)event {
@@ -162,6 +223,7 @@ constexpr float kMouseWheelZoom = 0.05f;
 }
 
 - (void)rightMouseDragged:(NSEvent *)event {
+    [self trackMouse:event];
     bool orbiting = (event.modifierFlags & NSEventModifierFlagShift) != 0;
     if (orbiting) {
         self.pendingOrbitYaw += (float)event.deltaX;
@@ -173,6 +235,7 @@ constexpr float kMouseWheelZoom = 0.05f;
 }
 
 - (void)otherMouseDragged:(NSEvent *)event {
+    [self trackMouse:event];
     self.pendingOrbitYaw += (float)event.deltaX;
     self.pendingOrbitPitch += (float)event.deltaY;
 }
@@ -323,14 +386,26 @@ constexpr float kMouseWheelZoom = 0.05f;
         .toggleFxaa = (bool)metalView.pendingToggleFxaa,
         .mouseX = metalView.pendingMouseX,
         .mouseY = metalView.pendingMouseY,
-        .mouseDown = (bool)metalView.pendingMouseDown,
+        .mouseLeftDown = (bool)metalView.pendingMouseLeftDown,
+        .mouseRightDown = (bool)metalView.pendingMouseRightDown,
+        .mouseMiddleDown = (bool)metalView.pendingMouseMiddleDown,
+        .scrollX = metalView.pendingScrollX,
+        .scrollY = metalView.pendingScrollY,
+        .shift = (bool)metalView.pendingShift,
+        .ctrl = (bool)metalView.pendingCtrl,
+        .alt = (bool)metalView.pendingAlt,
+        .cmd = (bool)metalView.pendingCmd,
         .fullscreen = (bool)metalView.inFullscreen,
     };
+    frameInput.keyEventCount =
+        [metalView drainKeyEventsInto:frameInput.keyEvents max:kMaxKeyEvents];
     metalView.pendingPanX = 0.0f;
     metalView.pendingPanY = 0.0f;
     metalView.pendingZoom = 0.0f;
     metalView.pendingOrbitYaw = 0.0f;
     metalView.pendingOrbitPitch = 0.0f;
+    metalView.pendingScrollX = 0.0f;
+    metalView.pendingScrollY = 0.0f;
     metalView.pendingCycleDebug = NO;
     metalView.pendingToggleFxaa = NO;
 

@@ -1,25 +1,46 @@
 #pragma once
 
-// One frame's worth of raw input from the platform layer. Pure C++ so both
-// the renderer (camera) and the UI core can share it without pulling in any
+// One frame's worth of input from the platform layer. Pure C++ so the
+// renderer (camera) and the UI core can share it without pulling in any
 // platform or graphics headers.
 
+struct KeyEvent {
+    int keyCode;
+    unsigned int codepoint; // 0 when the key produces no character
+    bool pressed;           // true = key down, false = key up
+};
+
+constexpr int kMaxKeyEvents = 16;
+
 struct FrameInput {
-    // Accumulated pointer deltas since the last frame. Plain points/units —
-    // the renderer decides how to interpret them.
-    float panX;        // two-finger drag or right-drag
-    float panY;        // two-finger drag or right-drag
-    float zoomDelta;   // pinch magnification or mouse wheel
-    float orbitYaw;    // shift + two-finger drag, shift-right-drag, or middle-drag
-    float orbitPitch;  // shift + two-finger drag, shift-right-drag, or middle-drag
+    // Accumulated camera pointer deltas since the last frame.
+    float panX;
+    float panY;
+    float zoomDelta;
+    float orbitYaw;
+    float orbitPitch;
     bool cycleDebugView; // one keypress: advance the AO debug view mode
     bool toggleFxaa;     // one keypress: enable/disable the FXAA post pass
 
-    // Absolute cursor state for the UI, in backing pixels with a top-left
-    // origin (same space the renderer's drawable uses).
+    // Cursor in backing pixels with a top-left origin (the drawable's space).
     float mouseX;
     float mouseY;
-    bool mouseDown; // left button currently held
+    bool mouseLeftDown;
+    bool mouseRightDown;
+    bool mouseMiddleDown;
+
+    // Scroll for the UI, accumulated per frame. Separate from the camera
+    // zoom/pan deltas above.
+    float scrollX;
+    float scrollY;
+
+    bool shift;
+    bool ctrl;
+    bool alt;
+    bool cmd;
+
+    KeyEvent keyEvents[kMaxKeyEvents]; // overflow past kMaxKeyEvents is dropped
+    int keyEventCount;
 
     bool fullscreen; // borderless fullscreen: the in-app menu strip is forced on
 };

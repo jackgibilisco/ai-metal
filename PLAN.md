@@ -587,3 +587,47 @@ reinvent from scratch.
   cubes + right panel still render; File > Import File... opens the panel;
   View > Toggle Full Screen exits; Toggle Menu Bar is greyed and inert.
 - No Metal validation errors.
+
+## Feature: UI foundation refactor (for text atlas / keybindings / docking)
+
+### Problem
+The immediate-mode UI shipped enough to prototype, but the next agents (glyph
+atlas, keybinding layer, dockable panels) need a stable vertex ABI, a real
+input snapshot, and a clean state boundary. Do those now while cheap.
+
+### Changes
+- `UiVertex` gains `float u, v` and `float mode` (0 = solid, 1 reserved for
+  textured glyphs). `ui_render_metal` declares attributes 2/3 in the vertex
+  descriptor and the shader; the fragment still returns vertex color. All
+  push paths set `u = v = mode = 0`.
+- `FrameInput` becomes a per-frame input snapshot: `mouseLeftDown` /
+  `mouseRightDown` / `mouseMiddleDown` level bits, `scrollX` / `scrollY`
+  (UI scroll, separate from the camera pan/zoom deltas), `shift` / `ctrl` /
+  `alt` / `cmd`, and a fixed `KeyEvent keyEvents[16]` queue with
+  `keyEventCount` (overflow dropped). `o` / `f` / `F3` keep their one-shot
+  bools; those keys also enqueue a `KeyEvent`.
+- `platform_macos.mm`: `AppMetalView` gains `rightMouseDown/Up`,
+  `otherMouseDown/Up`, `flagsChanged:`, `keyUp:`, an `enqueueKey:pressed:` /
+  `drainKeyEventsInto:max:` pair over a `KeyEvent[kMaxKeyEvents]` ivar, and
+  a UI-scroll accumulator in `scrollWheel:` alongside the untouched camera
+  path. `renderIntoDrawable:` assembles the fuller `FrameInput` and resets
+  the per-frame accumulators (deltas, scroll, key queue) but not level
+  state.
+- `UiWantsMouse` / `UiWantsKeyboard`: true when the cursor is over the panel
+  / splitter / menu strip / open dropdown, or a UI drag is active. `app.mm`
+  zeroes the camera pan/zoom/orbit deltas on frames where `UiWantsMouse` is
+  true, so dragging a slider no longer also moves the camera.
+- Demo slider values move out of `UiState` into an app-owned `UiDemoState`
+  passed into `UiBuildFrame` by pointer. UiState = view state only; the UI
+  renders app/game state and returns intents.
+- `PushVertex` overflow is now `assert(vertexCount < kMaxVertices)` instead
+  of a silent drop; `kMaxVertices` (and `ui_render_metal`'s
+  `kMaxUiVertices`) raised to 65536.
+
+### Verify
+- `make` clean, no new warnings; `make run` with Metal API + GPU + shader
+  validation: 3 cubes + right panel render, no validation errors.
+- Buttons highlight on hover / depress on click; both sliders drag and
+  update their `%.2f` readouts.
+- `o` / `f` / `F3` unchanged; camera orbit/pan/zoom works over the viewport
+  but is suppressed while the cursor is over the panel.

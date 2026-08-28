@@ -76,14 +76,19 @@ Layers, each with a different portability contract:
   rotation by `deltaTime`. This is the file to extend for anything that is
   simulation/gameplay rather than rendering.
 - **`src/ui.h`/`.cpp`** — pure C++ immediate-mode UI, no Metal/AppKit. Each
-  frame `UiBuildFrame` reads one `FrameInput`, runs the widget calls (a
-  resizable right panel with buttons/sliders behind a draggable splitter,
+  frame `UiBuildFrame` reads one `FrameInput` plus an app-owned
+  `UiDemoState*` (the values the demo sliders edit), runs the widget calls
+  (a resizable right panel with buttons/sliders behind a draggable splitter,
   plus a top menu strip generated from `MenuBarDefault()`), and fills a flat
-  `UiVertex` triangle list in screen-pixel coordinates. Only a small blob of
-  state survives frames (splitter width, hot/active widget id, open menu,
-  previous mouse). Reports the content rect the scene may use
+  `UiVertex` triangle list (`x, y, u, v, mode, rgba` — `mode` 0 solid, 1
+  reserved for glyphs) in screen-pixel coordinates. `UiState` is view state
+  only: splitter width, hot/active widget id, open menu, previous mouse — it
+  renders app/game state passed in and returns intents, it does not own
+  domain data. Reports the content rect the scene may use
   (`UiContentOriginX/Y`, `UiContentWidth/Height` — drawable minus panel and
-  strip) and any clicked `MenuAction` (`UiTakeMenuAction`). Text is
+  strip), any clicked `MenuAction` (`UiTakeMenuAction`), and whether it owns
+  the pointer/keyboard this frame (`UiWantsMouse` / `UiWantsKeyboard`).
+  `PushVertex` asserts on overflow of the 65536-vertex buffer. Text is
   solid-color quads via the vendored, ASCII-only
   `src/third_party/stb_easy_font.h`.
 - **`src/menu.h`/`.cpp`** — pure C++ menu model: the `MenuAction` enum, the
@@ -126,12 +131,15 @@ Layers, each with a different portability contract:
   drives `FrameUpdate` then `FrameRender` once per `CAMetalDisplayLink`
   callback), the arena allocation, and
   reading trackpad/mouse `NSEvent`s (`scrollWheel:`/`magnifyWithEvent:`/
-  `rightMouseDragged:`/`otherMouseDragged:` for the camera; left
-  `mouseDown:`/`mouseUp:`/`mouseDragged:`/`mouseMoved:` + a tracking area
-  for the UI cursor) and the `o`/`f`/`F3` keys (`keyDown:`) on an
-  `AppMetalView` subclass into the `FrameInput` (which also carries a
-  `fullscreen` flag) passed to `FrameUpdate`, and forwarding `MTKView`'s
-  `drawableSizeWillChange:` to `FrameResize`. `InstallMainMenu` builds the
+  `rightMouseDragged:`/`otherMouseDragged:` for the camera; all three mouse
+  buttons' down/up, `mouseDragged:`/`mouseMoved:` + a tracking area,
+  `flagsChanged:` for modifiers, and a `keyDown:`/`keyUp:` `KeyEvent` queue
+  for the UI cursor) plus the `o`/`f`/`F3` one-shot keys, all assembled in
+  `renderIntoDrawable:` into the per-frame `FrameInput` snapshot (which also
+  carries `fullscreen`) passed to `FrameUpdate`, and forwarding `MTKView`'s
+  `drawableSizeWillChange:` to `FrameResize`. `app.mm` zeroes the camera
+  deltas on frames where `UiWantsMouse` is true so panel drags don't move
+  the camera. `InstallMainMenu` builds the
   `NSMenu` bar by iterating `MenuBarDefault()`; every item carries its
   `MenuAction` in its `tag` and routes through one `-dispatchMenuAction:` ->
   `AppDispatchMenuAction`, with `-validateMenuItem:` reflecting
