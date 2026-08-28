@@ -14,9 +14,19 @@
 void Init(Arena *arena, id<MTLDevice> device, MTLPixelFormat colorFormat,
           MTLPixelFormat depthFormat, float drawableWidth, float drawableHeight,
           PlatformMenuHooks menuHooks);
-void FrameUpdate(Arena *arena, float deltaTime, FrameInput input);
+// Returns true if the frame changed something the renderer would draw
+// differently (scene animated, camera moved, a render toggle fired, the UI is
+// being interacted with, or a render was explicitly requested). When it
+// returns false the platform layer may skip FrameRender and leave the last
+// presented frame on screen.
+bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input);
 void FrameRender(Arena *arena, RenderTarget target);
 void FrameResize(Arena *arena, float drawableWidth, float drawableHeight);
+
+// Force the next few FrameUpdate calls to report "needs render" — used after
+// the frame loop resumes or the HUD is toggled, so multi-buffered targets
+// flush to the screen.
+void AppRequestRender(Arena *arena);
 
 // Per-pass GPU time of the last completed frame, for the F3 HUD.
 RendererPassTimings FrameGpuTimings(Arena *arena);

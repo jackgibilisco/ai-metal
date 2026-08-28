@@ -16,6 +16,7 @@ struct AppState {
     UiDemoState demo;
     MenuState menu;
     PlatformMenuHooks menuHooks;
+    int forcedRenderFrames; // FrameUpdate reports "needs render" while this is > 0
 };
 
 } // namespace
@@ -33,14 +34,22 @@ void Init(Arena *arena, id<MTLDevice> device, MTLPixelFormat colorFormat,
     appState->menuHooks = menuHooks;
 }
 
-void FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
+bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     AppState *appState = (AppState *)arena->base;
-    GameUpdate(appState->game, deltaTime);
+
+    if (input.toggleSpin) {
+        GameToggleSpin(appState->game);
+        appState->forcedRenderFrames = 1;
+    }
+
+    bool sceneAnimated = GameUpdate(appState->game, deltaTime);
+
     UiBuildFrame(appState->ui, input, appState->menu.showMenuBar, &appState->demo);
 
     MenuAction menuAction = UiTakeMenuAction(appState->ui);
     if (menuAction != MenuAction_None) {
         MenuInvoke(menuAction, &appState->menu, appState->menuHooks);
+        appState->forcedRenderFrames = 3;
     }
 
     FrameInput cameraInput = input;
@@ -52,6 +61,20 @@ void FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
         cameraInput.orbitPitch = 0.0f;
     }
     RendererUpdateCamera(appState->renderer, cameraInput);
+
+    bool cameraMoved = cameraInput.panX != 0.0f || cameraInput.panY != 0.0f ||
+                       cameraInput.zoomDelta != 0.0f || cameraInput.orbitYaw != 0.0f ||
+                       cameraInput.orbitPitch != 0.0f;
+    bool renderToggled = input.cycleDebugView || input.toggleFxaa;
+    bool uiInteracting = UiWantsMouse(appState->ui) || UiWantsKeyboard(appState->ui);
+
+    bool needsRender = sceneAnimated || cameraMoved || renderToggled || uiInteracting ||
+                       appState->forcedRenderFrames > 0;
+
+    if (appState->forcedRenderFrames > 0) {
+        appState->forcedRenderFrames--;
+    }
+    return needsRender;
 }
 
 void FrameRender(Arena *arena, RenderTarget target) {
@@ -73,6 +96,12 @@ void FrameResize(Arena *arena, float drawableWidth, float drawableHeight) {
     RendererSetContentRect(appState->renderer, UiContentOriginX(appState->ui),
                            UiContentOriginY(appState->ui), UiContentWidth(appState->ui),
                            UiContentHeight(appState->ui));
+    appState->forcedRenderFrames = 3;
+}
+
+void AppRequestRender(Arena *arena) {
+    AppState *appState = (AppState *)arena->base;
+    appState->forcedRenderFrames = 3;
 }
 
 RendererPassTimings FrameGpuTimings(Arena *arena) {
@@ -92,5 +121,9 @@ MenuState AppMenuState(Arena *arena) {
 
 bool ImportBlendFile(Arena *arena, const char *filepath) {
     AppState *appState = (AppState *)arena->base;
-    return GameImportBlendFile(appState->game, filepath);
+    bool imported = GameImportBlendFile(appState->game, filepath);
+    if (imported) {
+        appState->forcedRenderFrames = 3;
+    }
+    return imported;
 }

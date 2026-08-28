@@ -25,7 +25,12 @@ GameState *GameInit(Arena *arena) {
     return state;
 }
 
-void GameUpdate(GameState *state, float deltaTime) {
+bool GameUpdate(GameState *state, float deltaTime) {
+    if (state->spinPaused || deltaTime <= 0.0f) {
+        return false;
+    }
+
+    bool advanced = false;
     for (int i = 0; i < state->objectCount; ++i) {
         SceneObject &object = state->objects[i];
         bool spins = object.rotationSpeed.x != 0.0f || object.rotationSpeed.y != 0.0f ||
@@ -37,7 +42,13 @@ void GameUpdate(GameState *state, float deltaTime) {
         object.rotationEuler.y += object.rotationSpeed.y * deltaTime;
         object.rotationEuler.z += object.rotationSpeed.z * deltaTime;
         object.rotation = Mat4EulerXYZ(object.rotationEuler);
+        advanced = true;
     }
+    return advanced;
+}
+
+void GameToggleSpin(GameState *state) {
+    state->spinPaused = !state->spinPaused;
 }
 
 bool GameImportBlendFile(GameState *state, const char *filepath) {

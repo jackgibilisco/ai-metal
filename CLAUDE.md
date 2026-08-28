@@ -27,11 +27,14 @@ distinct, independently-rotating cubes render without a crash or Metal
 validation error in the console output, alongside a resizable right-hand UI
 panel (draggable splitter, demo buttons/sliders) that shrinks the 3D
 viewport. The `o` key cycles the ambient-occlusion debug view (normal / raw
-AO buffer / AO disabled); the `f` key toggles the FXAA post pass; `F3`
-toggles the frame-timing debug HUD (which also shows per-pass GPU time);
-⌃⌘F (View menu) toggles borderless fullscreen. In fullscreen an in-app menu
-strip appears at the top (mirroring the hidden macOS menu bar); View >
-Toggle Menu Bar also shows it while windowed.
+AO buffer / AO disabled); the `f` key toggles the FXAA post pass; the `p`
+key pauses/resumes the cube spin (with spin paused and no UI interaction the
+renderer stops redrawing); `F3` toggles the frame-timing debug HUD (which
+also shows per-pass GPU time); ⌃⌘F (View menu) toggles borderless
+fullscreen. In fullscreen an in-app menu strip appears at the top
+(mirroring the hidden macOS menu bar); View > Toggle Menu Bar also shows it
+while windowed. The frame loop pauses entirely when the app is inactive or
+its window is minimized/occluded.
 
 ## Architecture
 
@@ -50,14 +53,23 @@ The public API the platform layer drives (`src/app.h`):
 
 ```
 Init(arena, device, colorFormat, depthFormat, drawableW, drawableH, menuHooks) // once
-FrameUpdate(arena, deltaTime, FrameInput)                                      // every frame
-FrameRender(arena, RenderTarget)                                              // every frame
+FrameUpdate(arena, deltaTime, FrameInput) -> bool needsRender                  // every tick
+FrameRender(arena, RenderTarget)                                              // only when needsRender
 FrameResize(arena, drawableW, drawableH)                                      // on drawable resize
+AppRequestRender(arena)                                                       // force the next few renders
 AppDispatchMenuAction(arena, MenuAction) / AppMenuState(arena)                 // native menu bar
 ```
 
+`FrameUpdate` returns whether anything the renderer would draw differently
+changed this frame (scene animated, camera moved, a render toggle fired, the
+UI is being interacted with, or `AppRequestRender` was called); when it
+returns false the platform layer skips `FrameRender` and leaves the last
+presented drawable on screen. The `CAMetalDisplayLink` is paused outright
+when the window can't be seen (see the platform layer).
+
 `Init` pushes a small `AppState { GameState*, RendererState*, UiState*,
-UiRenderState*, MenuState, PlatformMenuHooks }` as the very first thing in
+UiRenderState*, UiDemoState, MenuState, PlatformMenuHooks, int
+forcedRenderFrames }` as the very first thing in
 the arena (`src/app.mm`). `FrameUpdate`/`FrameRender` recover it by
 reinterpreting `arena->base` — there are no global/static pointers holding
 program state. `FrameUpdate` builds the immediate-mode UI and routes any
@@ -72,9 +84,11 @@ Layers, each with a different portability contract:
 
 - **`src/game.h`/`.cpp`** — pure, platform-agnostic C++. No Metal, no AppKit,
   no platform headers of any kind. Owns `GameState` (currently 3 `Cube`s:
-  position + rotation) and `GameUpdate`, which just advances each cube's
-  rotation by `deltaTime`. This is the file to extend for anything that is
-  simulation/gameplay rather than rendering.
+  position + rotation, plus a `spinPaused` flag toggled by `GameToggleSpin`
+  / the `p` key). `GameUpdate` advances each cube's rotation by `deltaTime`
+  and returns whether anything actually moved, so the platform can skip
+  rendering an unchanged scene. This is the file to extend for anything that
+  is simulation/gameplay rather than rendering.
 - **`src/ui.h`/`.cpp`** — pure C++ immediate-mode UI, no Metal/AppKit. Each
   frame `UiBuildFrame` reads one `FrameInput` plus an app-owned
   `UiDemoState*` (the values the demo sliders edit), runs the widget calls
@@ -128,18 +142,24 @@ Layers, each with a different portability contract:
   See PLAN.md for the SSAO and FXAA detail.
 - **`src/platform_macos.mm`** — the only file allowed to touch AppKit. Owns
   the `NSWindow`, the `MTKView` (+ its delegate, whose `renderIntoDrawable:`
-  drives `FrameUpdate` then `FrameRender` once per `CAMetalDisplayLink`
-  callback), the arena allocation, and
+  drives `FrameUpdate` every `CAMetalDisplayLink` callback and `FrameRender`
+  only when `FrameUpdate` reports a change), the arena allocation, and
   reading trackpad/mouse `NSEvent`s (`scrollWheel:`/`magnifyWithEvent:`/
   `rightMouseDragged:`/`otherMouseDragged:` for the camera; all three mouse
   buttons' down/up, `mouseDragged:`/`mouseMoved:` + a tracking area,
   `flagsChanged:` for modifiers, and a `keyDown:`/`keyUp:` `KeyEvent` queue
-  for the UI cursor) plus the `o`/`f`/`F3` one-shot keys, all assembled in
-  `renderIntoDrawable:` into the per-frame `FrameInput` snapshot (which also
-  carries `fullscreen`) passed to `FrameUpdate`, and forwarding `MTKView`'s
-  `drawableSizeWillChange:` to `FrameResize`. `app.mm` zeroes the camera
-  deltas on frames where `UiWantsMouse` is true so panel drags don't move
-  the camera. `InstallMainMenu` builds the
+  for the UI cursor) plus the `o`/`f`/`p`/`F3` one-shot keys, all assembled
+  in `renderIntoDrawable:` into the per-frame `FrameInput` snapshot (which
+  also carries `fullscreen`) passed to `FrameUpdate`, and forwarding
+  `MTKView`'s `drawableSizeWillChange:` to `FrameResize`. `app.mm` zeroes
+  the camera deltas on frames where `UiWantsMouse` is true so panel drags
+  don't move the camera. `AppDelegate.updateFrameLoopRunning` pauses the
+  `CAMetalDisplayLink` outright when the render can't be seen (`!NSApp.active`,
+  window minimized, or not `NSWindowOcclusionStateVisible`) and resumes on
+  the matching `windowDidChangeOcclusionState:` /
+  `applicationDid{Become,Resign}Active:` / `windowDid{Miniaturize,Deminiaturize}:`
+  notifications, re-priming `AppViewDelegate.lastTime` and calling
+  `AppRequestRender`. `InstallMainMenu` builds the
   `NSMenu` bar by iterating `MenuBarDefault()`; every item carries its
   `MenuAction` in its `tag` and routes through one `-dispatchMenuAction:` ->
   `AppDispatchMenuAction`, with `-validateMenuItem:` reflecting

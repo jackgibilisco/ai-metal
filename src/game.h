@@ -29,10 +29,15 @@ constexpr int kMaxSceneObjects = 128;
 struct GameState {
     SceneObject objects[kMaxSceneObjects];
     int objectCount;
+    bool spinPaused;
 };
 
 GameState *GameInit(Arena *arena);
-void GameUpdate(GameState *state, float deltaTime);
+
+// Advances the spinning demo cubes. Returns true if any rotation actually
+// changed this frame, so the caller can skip rendering an unchanged scene.
+bool GameUpdate(GameState *state, float deltaTime);
+void GameToggleSpin(GameState *state);
 
 // Replaces the current scene with the cube/plane objects found in a Blender
 // 5.x .blend file. Returns false (leaving the scene unchanged) if the file

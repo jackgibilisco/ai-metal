@@ -631,3 +631,46 @@ input snapshot, and a clean state boundary. Do those now while cheap.
   update their `%.2f` readouts.
 - `o` / `f` / `F3` unchanged; camera orbit/pan/zoom works over the viewport
   but is suppressed while the cursor is over the panel.
+
+## Feature: throttle scene rendering when unseen or idle
+
+### Problem
+The frame loop rendered the scene every display refresh unconditionally,
+even when the window was hidden or nothing on screen was changing. Two
+levels of waste: (a) rendering while the result cannot be seen at all (app
+inactive, window minimized or fully occluded), (b) rendering identical
+frames while the scene is static and no UI interaction is happening.
+
+### Design
+- **Not visible -> pause the frame loop.** `AppDelegate.updateFrameLoopRunning`
+  computes `NSApp.active && windowVisible && !window.miniaturized`
+  (`windowVisible` from `NSWindowOcclusionStateVisible`) and sets
+  `CAMetalDisplayLink.paused` accordingly. Driven by
+  `windowDidChangeOcclusionState:`, `applicationDidBecomeActive:` /
+  `applicationDidResignActive:`, `windowDidMiniaturize:` /
+  `windowDidDeminiaturize:`. On resume it zeroes `AppViewDelegate.lastTime`
+  (so the first frame back does not integrate the whole gap) and calls
+  `AppRequestRender`.
+- **Idle -> skip the render.** `FrameUpdate` returns `bool` — true when the
+  scene animated, the camera moved, a render toggle fired, the UI is being
+  interacted with (`UiWantsMouse || UiWantsKeyboard`, or a menu action
+  fired), or a render was explicitly requested. `renderIntoDrawable:` skips
+  `FrameRender` (and the HUD frame-time push) when it returns false, leaving
+  the last presented drawable on screen. `FrameUpdate` still runs every tick.
+- **Spin pause.** `GameState.spinPaused` (default off) plus `GameToggleSpin`,
+  bound to the `p` key via `FrameInput.toggleSpin`. `GameUpdate` returns
+  whether any rotation actually advanced, which is what makes idle detection
+  possible for the demo scene.
+- **`AppRequestRender(arena)`** sets a small `forcedRenderFrames` countdown
+  in `AppState` so a resumed loop, a resize, an import, a HUD toggle, or a
+  menu action flushes through multi-buffered targets.
+
+### Measured (M-series, 240 Hz, MTL_DEBUG_LAYER + shader validation, no errors)
+- Active + spinning: ~35% CPU.
+- Spin paused (`p`), camera still (idle-skip): ~3% CPU (FrameUpdate only).
+- App inactive / window minimized: <1% CPU (loop paused); resumes clean.
+
+### Not doing
+- Pausing the display link on idle (not just skipping the render) — would
+  need every input path to wake it. Left running per the "FrameUpdate every
+  tick" contract.

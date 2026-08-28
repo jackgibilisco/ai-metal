@@ -50,6 +50,7 @@ constexpr float kMouseWheelZoom = 0.05f;
 @property(nonatomic) BOOL pendingCycleDebug;
 @property(nonatomic) BOOL pendingToggleFxaa;
 @property(nonatomic) BOOL pendingToggleHud;
+@property(nonatomic) BOOL pendingToggleSpin;
 @property(nonatomic) float pendingMouseX; // backing pixels, top-left origin
 @property(nonatomic) float pendingMouseY;
 @property(nonatomic) BOOL pendingMouseLeftDown;
@@ -116,6 +117,10 @@ constexpr float kMouseWheelZoom = 0.05f;
     }
     if (event.keyCode == 99) { // F3
         self.pendingToggleHud = YES;
+        return;
+    }
+    if ([event.charactersIgnoringModifiers isEqualToString:@"p"]) {
+        self.pendingToggleSpin = YES;
         return;
     }
     if (event.keyCode == 53 && self.inFullscreen && self.onToggleFullscreen) { // Escape
@@ -384,6 +389,7 @@ constexpr float kMouseWheelZoom = 0.05f;
         .orbitPitch = metalView.pendingOrbitPitch,
         .cycleDebugView = (bool)metalView.pendingCycleDebug,
         .toggleFxaa = (bool)metalView.pendingToggleFxaa,
+        .toggleSpin = (bool)metalView.pendingToggleSpin,
         .mouseX = metalView.pendingMouseX,
         .mouseY = metalView.pendingMouseY,
         .mouseLeftDown = (bool)metalView.pendingMouseLeftDown,
@@ -408,19 +414,21 @@ constexpr float kMouseWheelZoom = 0.05f;
     metalView.pendingScrollY = 0.0f;
     metalView.pendingCycleDebug = NO;
     metalView.pendingToggleFxaa = NO;
+    metalView.pendingToggleSpin = NO;
 
     if (metalView.pendingToggleHud) {
         self.hudView.hidden = !self.hudView.hidden;
         metalView.pendingToggleHud = NO;
+        AppRequestRender(self.arena); // repopulate the frozen HUD readout
     }
+
+    bool needsRender = FrameUpdate(self.arena, deltaTime, frameInput);
+    if (!needsRender || drawable == nil) {
+        return; // nothing changed: leave the last presented frame on screen
+    }
+
     if (deltaTime > 0.0f) {
         [self.hudView pushFrameTime:deltaTime];
-    }
-
-    FrameUpdate(self.arena, deltaTime, frameInput);
-
-    if (drawable == nil) {
-        return;
     }
 
     RenderTarget target;
@@ -506,6 +514,7 @@ static void MenuHookQuit(void *context) {
     };
     Init(&_arena, device, self.view.colorPixelFormat, kDepthFormat, (float)drawableSize.width,
          (float)drawableSize.height, menuHooks);
+    AppRequestRender(&_arena);
 
     self.hudView = [[DebugHudView alloc] initWithFrame:self.view.bounds];
     self.hudView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -610,6 +619,48 @@ static void MenuHookQuit(void *context) {
 - (void)windowDidChangeScreen:(NSNotification *)notification {
     (void)notification;
     [self matchDisplayRefreshRate];
+}
+
+// Pause the CAMetalDisplayLink whenever the rendered result can't be seen —
+// app inactive, window minimized, or window fully occluded — and resume on
+// the way back, re-priming the frame clock so the first frame back doesn't
+// integrate the whole gap.
+- (void)updateFrameLoopRunning {
+    BOOL visible = (self.window.occlusionState & NSWindowOcclusionStateVisible) != 0;
+    BOOL shouldRun = NSApp.active && visible && !self.window.miniaturized;
+    if (shouldRun == !self.metalDisplayLink.paused) {
+        return;
+    }
+    self.metalDisplayLink.paused = !shouldRun;
+    if (shouldRun) {
+        self.viewDelegate.lastTime = 0;
+        AppRequestRender(&_arena);
+    }
+}
+
+- (void)windowDidChangeOcclusionState:(NSNotification *)notification {
+    (void)notification;
+    [self updateFrameLoopRunning];
+}
+
+- (void)windowDidMiniaturize:(NSNotification *)notification {
+    (void)notification;
+    [self updateFrameLoopRunning];
+}
+
+- (void)windowDidDeminiaturize:(NSNotification *)notification {
+    (void)notification;
+    [self updateFrameLoopRunning];
+}
+
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    (void)notification;
+    [self updateFrameLoopRunning];
+}
+
+- (void)applicationDidResignActive:(NSNotification *)notification {
+    (void)notification;
+    [self updateFrameLoopRunning];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
