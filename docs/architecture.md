@@ -19,13 +19,19 @@ Metal allocations, not arena pushes.
 ## Public API the platform layer drives (`src/app.h`)
 
 ```
-Init(arena, device, colorFormat, depthFormat, drawableW, drawableH, menuHooks) // once
+Init(arena, GpuContext*, drawableW, drawableH, menuHooks)                      // once
 FrameUpdate(arena, deltaTime, FrameInput) -> bool needsRender                  // every tick
-FrameRender(arena, RenderTarget)                                              // only when needsRender
+FrameRender(arena, RenderTarget*)                                             // only when needsRender
 FrameResize(arena, drawableW, drawableH)                                      // on drawable resize
 AppRequestRender(arena)                                                       // force the next few renders
 AppInvokeCommand(arena, CommandId) / AppCommandContext(arena)                  // native menu bar
 ```
+
+`GpuContext` (device + swapchain formats) and `RenderTarget` (command buffer
++ drawable) are forward-declared in `src/gpu.h` and opaque to `app.cpp`; the
+Metal backend defines them in `src/gpu_metal.h`. `platform_macos.mm` builds
+a `GpuContext` at startup and a `RenderTarget` each frame, and does the
+`presentDrawable:` + `commit` after `FrameRender` returns.
 
 `FrameUpdate` returns whether anything the renderer would draw differently
 changed this frame (scene animated, camera moved, a render toggle fired, the
@@ -37,12 +43,13 @@ when the window can't be seen (see the platform layer).
 `Init` pushes a small `AppState { GameState*, RendererState*, UiState*,
 UiRenderState*, UiDemoState, MenuState, PlatformMenuHooks, int
 forcedRenderFrames }` as the very first thing in
-the arena (`src/app.mm`). `FrameUpdate`/`FrameRender` recover it by
+the arena (`src/app.cpp`). `FrameUpdate`/`FrameRender` recover it by
 reinterpreting `arena->base` — there are no global/static pointers holding
 program state. `FrameUpdate` builds the immediate-mode UI, then routes any
 in-app menu click and any matched keyboard shortcut through the same
 `CommandInvoke` the native menu bar uses; `FrameRender` encodes the scene
-into the content region, then the UI overlay pass, then presents.
+into the content region, then the UI overlay pass. The platform layer
+presents and commits.
 
 The portable input/menu structs live in their own dependency-free headers
 (`src/frame_input.h`, `src/menu.h`) so the pure-C++ layers pull in no Metal.
@@ -93,14 +100,22 @@ The portable input/menu structs live in their own dependency-free headers
   fullscreen }`. The native `NSMenu`, the in-app strip, and the keybinding
   matcher all resolve through this one table, so shortcuts work with no
   native menu (a Windows port).
-- **`src/ui_render_metal.h`/`.mm`** — Metal backend for the UI: one pipeline
+- **`src/ui_render.h` + `src/ui_render_metal.mm`** — `ui_render.h` is the
+  graphics-API-free contract (`UiRenderInit(arena, GpuContext*)`,
+  `UiRenderEncode(state, RenderTarget*, ...)`); `ui_render_metal.mm` is the
+  Metal backend for the UI: one pipeline
   (fragment branches on `mode` — solid color, or color with alpha from the
   R8 glyph atlas), the glyph atlas texture, a per-frame vertex buffer, and
   one alpha-blended Load-action pass drawn on top of the drawable after the
-  scene. A Windows port adds a sibling `ui_render_d3d.*` and reuses `ui.cpp`
-  unchanged.
-- **`src/renderer_metal.h`/`.mm`** — Metal-specific but OS-agnostic: it never
-  touches AppKit/UIKit, only the Metal API. Owns `RendererState` (device, the
+  scene. A Windows port adds a sibling `ui_render_d3d12.cpp` and reuses
+  `ui.cpp` and `ui_render.h` unchanged.
+- **`src/renderer.h` + `src/renderer_metal.mm` + `src/gpu_metal.h`** —
+  `renderer.h` is the graphics-API-free contract (`RendererInit(arena,
+  GpuContext*, w, h)`, `RendererRender(state, game, RenderTarget*)`, and the
+  pure `RendererPassTimings` struct); `gpu_metal.h` gives `GpuContext` /
+  `RenderTarget` their Metal fields. `renderer_metal.mm` is Metal-specific but
+  OS-agnostic: it never touches AppKit/UIKit, only the Metal API. Owns
+  `RendererState` (device, the
   four pipelines — geometry, AO, lighting, FXAA — depth state,
   vertex/index/uniform buffers, the screen-sized targets + lit-color target,
   the AO sample kernel + noise texture, per-pass GPU timestamp sample buffer,
@@ -134,7 +149,7 @@ The portable input/menu structs live in their own dependency-free headers
   for the UI cursor) plus the `o`/`f`/`p`/`F3` one-shot keys, all assembled
   in `renderIntoDrawable:` into the per-frame `FrameInput` snapshot (which
   also carries `fullscreen`) passed to `FrameUpdate`, and forwarding
-  `MTKView`'s `drawableSizeWillChange:` to `FrameResize`. `app.mm` zeroes
+  `MTKView`'s `drawableSizeWillChange:` to `FrameResize`. `app.cpp` zeroes
   the camera deltas on frames where `UiWantsMouse` is true so panel drags
   don't move the camera. `AppDelegate.updateFrameLoopRunning` pauses the
   `CAMetalDisplayLink` outright when the render can't be seen (`!NSApp.active`,
@@ -158,7 +173,7 @@ The portable input/menu structs live in their own dependency-free headers
   `deltaTime` sample per frame. A future second platform (e.g. iOS or
   Windows) would add a new file at this layer plus a `ui_render_*` backend,
   and fill in `PlatformMenuHooks`; `game.*`, `ui.*`, `menu.*`, and
-  `renderer_metal.*` are unchanged. `MTKView`'s built-in draw loop is left paused
+  `renderer_metal.mm` is unchanged. `MTKView`'s built-in draw loop is left paused
   (`paused = YES`, `enableSetNeedsDisplay = NO`) — it caps at 120 Hz on
   macOS, and so does an `NSView` `CADisplayLink`. Frames are driven instead
   by a `CAMetalDisplayLink` on the view's `CAMetalLayer`, whose

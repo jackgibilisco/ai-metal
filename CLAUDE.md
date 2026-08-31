@@ -44,8 +44,14 @@ during `Init`, never freed. `Init` pushes `AppState { GameState*,
 RendererState*, UiState*, UiRenderState*, ... }` first; `FrameUpdate` /
 `FrameRender` recover it from `arena->base` — no global state pointers. The
 platform layer calls `Init` once, then `FrameUpdate(deltaTime, FrameInput)
--> needsRender` every tick and `FrameRender(RenderTarget)` only when that is
+-> needsRender` every tick and `FrameRender(RenderTarget*)` only when that is
 true (`src/app.h`).
+
+`src/app.h` and `src/app.cpp` name no graphics-API type: `GpuContext` and
+`RenderTarget` are forward-declared in `src/gpu.h` and passed as opaque
+pointers. The Metal backend defines them in `src/gpu_metal.h`. A Windows port
+adds `platform_windows.cpp` + `renderer_d3d12.cpp` + `ui_render_d3d12.cpp`
+against `app.h` / `renderer.h` / `ui_render.h` with no edits to the cores.
 
 Layers by portability contract:
 
@@ -54,9 +60,11 @@ Layers by portability contract:
 | `src/game.h`/`.cpp` | pure C++, no platform headers | `GameState` (3 cubes); extend here for simulation/gameplay |
 | `src/ui.h`/`.cpp` | pure C++, no Metal/AppKit | immediate-mode dockable panels, fills a flat `UiVertex` list; view state only |
 | `src/menu.h`/`.cpp` | pure C++ | one `Command` table + `MenuBar` layout; NSMenu, in-app strip, keybindings all resolve through it |
-| `src/ui_render_metal.*` | Metal only | UI pipeline, glyph atlas, per-frame vertex buffer |
-| `src/renderer_metal.*` | Metal, no AppKit | `RendererState`, 4 pipelines (geometry/AO/lighting/FXAA), deferred pass chain, orbit camera; does not present/commit |
-| `src/platform_macos.mm` | the only AppKit file | `NSWindow`, `MTKView`+`CAMetalDisplayLink`, arena alloc, NSEvent -> `FrameInput`, native menu |
+| `src/app.h`/`.cpp`, `src/gpu.h` | pure C++, no graphics API | wires game/renderer/ui/menu together; opaque `GpuContext`/`RenderTarget` |
+| `src/renderer.h`, `src/ui_render.h` | pure C++ contract | backend-agnostic renderer + UI-renderer signatures |
+| `src/renderer_metal.*` + `src/gpu_metal.h` | Metal, no AppKit | `RendererState`, 4 pipelines (geometry/AO/lighting/FXAA), deferred pass chain, orbit camera; does not present/commit |
+| `src/ui_render_metal.mm` | Metal only | UI pipeline, glyph atlas, per-frame vertex buffer |
+| `src/platform_macos.mm` | the only AppKit file | `NSWindow`, `MTKView`+`CAMetalDisplayLink`, arena alloc, NSEvent -> `FrameInput`, native menu, per-frame present + commit |
 | `src/math3d.h` | header-only pure C++ | column-major `Vec3`/`Mat4`, layout matches MSL `float4x4` |
 | `src/frame_input.h`, `frame_stats.h` | dependency-free headers | portable input/timing structs |
 

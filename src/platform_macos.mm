@@ -10,6 +10,7 @@
 #include "app.h"
 #include "arena.h"
 #include "frame_stats.h"
+#include "gpu_metal.h"
 
 namespace {
 constexpr size_t kArenaSize = 64 * 1024 * 1024;
@@ -449,7 +450,9 @@ constexpr float kMouseWheelZoom = 0.05f;
     target.commandBuffer = [self.commandQueue commandBuffer];
     target.drawable = drawable;
 
-    FrameRender(self.arena, target);
+    FrameRender(self.arena, &target);
+    [target.commandBuffer presentDrawable:target.drawable];
+    [target.commandBuffer commit];
 
     if (!self.hudView.hidden) {
         self.hudView.passTimings = FrameGpuTimings(self.arena);
@@ -526,8 +529,12 @@ static void MenuHookQuit(void *context) {
         .quit = MenuHookQuit,
         .context = (__bridge void *)self,
     };
-    Init(&_arena, device, self.view.colorPixelFormat, kDepthFormat, (float)drawableSize.width,
-         (float)drawableSize.height, menuHooks);
+    GpuContext gpu = {
+        .device = device,
+        .colorFormat = self.view.colorPixelFormat,
+        .depthFormat = kDepthFormat,
+    };
+    Init(&_arena, &gpu, (float)drawableSize.width, (float)drawableSize.height, menuHooks);
     AppRequestRender(&_arena);
 
     self.hudView = [[DebugHudView alloc] initWithFrame:self.view.bounds];

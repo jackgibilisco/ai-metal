@@ -1,20 +1,15 @@
 #pragma once
 
-// Metal-specific rendering. This file may use the Metal API freely, but must
-// not touch AppKit/UIKit or any other OS windowing API — the platform layer
-// owns the window and hands rendering targets in through RenderTarget.
-
-#import <Metal/Metal.h>
-#import <QuartzCore/QuartzCore.h>
+// The renderer contract, free of any graphics API. renderer_metal.mm is the
+// Metal implementation; a Windows port adds renderer_d3d12.cpp against this
+// same header and leaves game.cpp and this file untouched. The backend may
+// use its API freely but must not touch AppKit/UIKit or any OS windowing
+// API — the platform layer owns the window and hands rendering targets in.
 
 #include "arena.h"
 #include "frame_input.h"
 #include "game.h"
-
-struct RenderTarget {
-    id<MTLCommandBuffer> commandBuffer;
-    id<CAMetalDrawable> drawable;
-};
+#include "gpu.h"
 
 struct RendererState;
 
@@ -30,16 +25,15 @@ struct RendererPassTimings {
     float totalMs;
 };
 
-RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
-                             MTLPixelFormat colorFormat, MTLPixelFormat depthFormat,
-                             float drawableWidth, float drawableHeight);
+RendererState *RendererInit(Arena *arena, GpuContext *gpu, float drawableWidth,
+                            float drawableHeight);
 
 // The scene renders into an `(originX, originY, width, height)` region of the
-// drawable (the part the UI panel and menu strip don't take). Sets the
+// drawable (the part the UI panels and menu strip don't take). Sets the
 // projection aspect and rebuilds the screen-sized targets when the size
 // changes; the origin only shifts where the final pass writes the drawable.
 void RendererSetContentRect(RendererState *renderer, float originX, float originY, float width,
                             float height);
 void RendererUpdateCamera(RendererState *renderer, FrameInput input);
-void RendererRender(RendererState *renderer, const GameState *game, RenderTarget target);
+void RendererRender(RendererState *renderer, const GameState *game, RenderTarget *target);
 RendererPassTimings RendererLastFrameTimings(const RendererState *renderer);

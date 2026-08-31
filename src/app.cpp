@@ -2,7 +2,7 @@
 
 #include "game.h"
 #include "ui.h"
-#include "ui_render_metal.h"
+#include "ui_render.h"
 
 namespace {
 
@@ -31,15 +31,13 @@ void InvokeCommand(AppState *appState, CommandId id) {
 
 } // namespace
 
-void Init(Arena *arena, id<MTLDevice> device, MTLPixelFormat colorFormat,
-          MTLPixelFormat depthFormat, float drawableWidth, float drawableHeight,
+void Init(Arena *arena, GpuContext *gpu, float drawableWidth, float drawableHeight,
           PlatformMenuHooks menuHooks) {
     AppState *appState = ArenaPushStruct(arena, AppState);
     appState->game = GameInit(arena);
-    appState->renderer =
-        RendererInit(arena, device, colorFormat, depthFormat, drawableWidth, drawableHeight);
+    appState->renderer = RendererInit(arena, gpu, drawableWidth, drawableHeight);
     appState->ui = UiInit(arena, drawableWidth, drawableHeight);
-    appState->uiRender = UiRenderInit(arena, device, colorFormat);
+    appState->uiRender = UiRenderInit(arena, gpu);
     appState->demo = {0.5f, 0.35f};
     appState->menuHooks = menuHooks;
 }
@@ -101,7 +99,7 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     return needsRender;
 }
 
-void FrameRender(Arena *arena, RenderTarget target) {
+void FrameRender(Arena *arena, RenderTarget *target) {
     AppState *appState = (AppState *)arena->base;
     RendererSetContentRect(appState->renderer, UiContentOriginX(appState->ui),
                            UiContentOriginY(appState->ui), UiContentWidth(appState->ui),
@@ -110,8 +108,6 @@ void FrameRender(Arena *arena, RenderTarget target) {
     UiRenderEncode(appState->uiRender, target, UiVertices(appState->ui),
                    UiVertexCount(appState->ui), UiDrawableWidth(appState->ui),
                    UiDrawableHeight(appState->ui));
-    [target.commandBuffer presentDrawable:target.drawable];
-    [target.commandBuffer commit];
 }
 
 void FrameResize(Arena *arena, float drawableWidth, float drawableHeight) {

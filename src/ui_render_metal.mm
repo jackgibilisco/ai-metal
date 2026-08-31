@@ -1,4 +1,6 @@
-#include "ui_render_metal.h"
+#include "ui_render.h"
+
+#include "gpu_metal.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -101,7 +103,10 @@ id<MTLTexture> BuildFontAtlas(id<MTLDevice> device) {
 
 } // namespace
 
-UiRenderState *UiRenderInit(Arena *arena, id<MTLDevice> device, MTLPixelFormat colorFormat) {
+UiRenderState *UiRenderInit(Arena *arena, GpuContext *gpu) {
+    id<MTLDevice> device = gpu->device;
+    MTLPixelFormat colorFormat = gpu->colorFormat;
+
     UiRenderState *state = ArenaPushStruct(arena, UiRenderState);
 
     NSError *error = nil;
@@ -153,8 +158,9 @@ UiRenderState *UiRenderInit(Arena *arena, id<MTLDevice> device, MTLPixelFormat c
     return state;
 }
 
-void UiRenderEncode(UiRenderState *uiRender, RenderTarget target, const UiVertex *vertices,
+void UiRenderEncode(UiRenderState *uiRender, RenderTarget *targetPtr, const UiVertex *vertices,
                     int vertexCount, float drawableWidth, float drawableHeight) {
+    RenderTarget target = *targetPtr;
     if (vertexCount <= 0) {
         return;
     }

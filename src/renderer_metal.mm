@@ -1,4 +1,6 @@
-#include "renderer_metal.h"
+#include "renderer.h"
+
+#include "gpu_metal.h"
 
 #include <cstddef>
 #include <cstdlib>
@@ -544,9 +546,12 @@ void AttachPassTiming(RendererState *renderer, MTLRenderPassDescriptor *pass, in
 
 } // namespace
 
-RendererState *RendererInit(Arena *arena, id<MTLDevice> device,
-                             MTLPixelFormat colorFormat, MTLPixelFormat depthFormat,
-                             float drawableWidth, float drawableHeight) {
+RendererState *RendererInit(Arena *arena, GpuContext *gpu, float drawableWidth,
+                            float drawableHeight) {
+    id<MTLDevice> device = gpu->device;
+    MTLPixelFormat colorFormat = gpu->colorFormat;
+    MTLPixelFormat depthFormat = gpu->depthFormat;
+
     RendererState *state = ArenaPushStruct(arena, RendererState);
     state->device = device;
     state->colorFormat = colorFormat;
@@ -844,7 +849,8 @@ void ResolvePassTimings(RendererState *renderer, uint32_t encodedSlotMask,
 
 } // namespace
 
-void RendererRender(RendererState *renderer, const GameState *game, RenderTarget target) {
+void RendererRender(RendererState *renderer, const GameState *game, RenderTarget *targetPtr) {
+    RenderTarget target = *targetPtr;
     bool aoEnabled = renderer->debugMode != 2;
     bool fxaaEnabled = renderer->fxaaEnabled;
 
