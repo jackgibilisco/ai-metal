@@ -110,6 +110,9 @@ TimelineClipId TimelineSubmitCreateClip(TimelineState *timeline, SceneState *sce
 void TimelineSubmitDeleteClip(TimelineState *timeline, SceneState *scene, TimelineClipId id);
 void TimelineSubmitMoveClip(TimelineState *timeline, SceneState *scene, TimelineClipId id,
                             TrackId newTrack, double newStartTime);
+// Trimming the head (a larger trimIn) slides startTime by the same delta, so the
+// audio that survives the trim keeps its position on the timeline. Trimming the
+// tail (trimOut / duration) leaves startTime alone.
 void TimelineSubmitTrimClip(TimelineState *timeline, SceneState *scene, TimelineClipId id,
                             double trimIn, double trimOut, double duration);
 

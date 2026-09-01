@@ -42,6 +42,9 @@ constexpr float kMouseWheelZoom = 0.05f;
 // is under the cursor — they don't require first-responder status the way key
 // events do. Deltas are just accumulated per frame and handed to the renderer
 // in renderIntoDrawable:, which resets them.
+constexpr int kMaxDroppedFiles = 16;
+constexpr int kMaxDropPathLength = 1024;
+
 @interface AppMetalView : MTKView
 @property(nonatomic) float pendingPanX;
 @property(nonatomic) float pendingPanY;
@@ -62,14 +65,28 @@ constexpr float kMouseWheelZoom = 0.05f;
 @property(nonatomic) BOOL pendingCtrl;
 @property(nonatomic) BOOL pendingAlt;
 @property(nonatomic) BOOL pendingCmd;
+@property(nonatomic) int pendingDropCount;
+@property(nonatomic) float pendingDropX; // backing pixels, top-left origin
+@property(nonatomic) float pendingDropY;
 @property(nonatomic) BOOL inFullscreen; // kept in sync by AppDelegate
 @property(nonatomic, copy) void (^onToggleFullscreen)(void);
 - (int)drainKeyEventsInto:(KeyEvent *)dest max:(int)max;
+- (const char *const *)droppedFilePaths;
 @end
 
 @implementation AppMetalView {
     KeyEvent _pendingKeyEvents[kMaxKeyEvents];
     int _pendingKeyEventCount;
+    char _droppedPaths[kMaxDroppedFiles][kMaxDropPathLength];
+    const char *_droppedPathPointers[kMaxDroppedFiles];
+}
+
+- (instancetype)initWithFrame:(CGRect)frame device:(id<MTLDevice>)device {
+    self = [super initWithFrame:frame device:device];
+    if (self != nil) {
+        [self registerForDraggedTypes:@[ NSPasteboardTypeFileURL ]];
+    }
+    return self;
 }
 
 - (BOOL)acceptsFirstResponder {
@@ -99,6 +116,48 @@ constexpr float kMouseWheelZoom = 0.05f;
     }
     _pendingKeyEventCount = 0;
     return count;
+}
+
+- (const char *const *)droppedFilePaths {
+    return _droppedPathPointers;
+}
+
+- (NSArray<NSURL *> *)wavURLsFromDrag:(id<NSDraggingInfo>)sender {
+    NSArray *urls = [sender.draggingPasteboard
+        readObjectsForClasses:@[ [NSURL class] ]
+                      options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
+    NSMutableArray<NSURL *> *wavs = [NSMutableArray array];
+    for (NSURL *url in urls) {
+        if ([url.pathExtension caseInsensitiveCompare:@"wav"] == NSOrderedSame) {
+            [wavs addObject:url];
+        }
+    }
+    return wavs;
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    return [self wavURLsFromDrag:sender].count > 0 ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSArray<NSURL *> *wavs = [self wavURLsFromDrag:sender];
+    int count = (int)wavs.count;
+    if (count == 0) {
+        return NO;
+    }
+    if (count > kMaxDroppedFiles) {
+        count = kMaxDroppedFiles;
+    }
+    for (int i = 0; i < count; ++i) {
+        strlcpy(_droppedPaths[i], wavs[i].fileSystemRepresentation, kMaxDropPathLength);
+        _droppedPathPointers[i] = _droppedPaths[i];
+    }
+    NSPoint inView = [self convertPoint:sender.draggingLocation fromView:nil];
+    NSPoint inBacking = [self convertPointToBacking:inView];
+    self.pendingDropX = (float)inBacking.x;
+    self.pendingDropY = (float)(self.drawableSize.height - inBacking.y);
+    self.pendingDropCount = count;
+    return YES;
 }
 
 // Intercepts the View menu's Cmd-F item and any programmatic -toggleFullScreen:,
@@ -414,6 +473,10 @@ constexpr float kMouseWheelZoom = 0.05f;
     };
     frameInput.keyEventCount =
         [metalView drainKeyEventsInto:frameInput.keyEvents max:kMaxKeyEvents];
+    frameInput.droppedFiles = [metalView droppedFilePaths];
+    frameInput.droppedFileCount = metalView.pendingDropCount;
+    frameInput.dropX = metalView.pendingDropX;
+    frameInput.dropY = metalView.pendingDropY;
     metalView.pendingPanX = 0.0f;
     metalView.pendingPanY = 0.0f;
     metalView.pendingZoom = 0.0f;
@@ -423,6 +486,7 @@ constexpr float kMouseWheelZoom = 0.05f;
     metalView.pendingScrollY = 0.0f;
     metalView.pendingCycleDebug = NO;
     metalView.pendingToggleFxaa = NO;
+    metalView.pendingDropCount = 0;
 
     if (metalView.pendingToggleHud) {
         self.hudView.hidden = !self.hudView.hidden;

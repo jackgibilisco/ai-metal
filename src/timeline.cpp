@@ -471,6 +471,8 @@ void TimelineSubmitTrimClip(TimelineState *timeline, SceneState *scene, Timeline
     payload->generation = HandleGen(id);
     payload->clipBefore = entry->clip;
     payload->clipAfter = entry->clip;
+    payload->clipAfter.startTime =
+        NonNegative(entry->clip.startTime + (NonNegative(trimIn) - entry->clip.trimIn));
     payload->clipAfter.trimIn = NonNegative(trimIn);
     payload->clipAfter.trimOut = NonNegative(trimOut);
     payload->clipAfter.duration = NonNegative(duration);

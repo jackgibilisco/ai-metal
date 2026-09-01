@@ -44,4 +44,11 @@ struct FrameInput {
     int keyEventCount;
 
     bool fullscreen; // borderless fullscreen: the in-app menu strip is forced on
+
+    // Files dropped onto the window this frame. The array and the strings it
+    // points at are owned by the platform layer and valid for this frame only.
+    const char *const *droppedFiles;
+    int droppedFileCount;
+    float dropX; // drop point in backing pixels, top-left origin
+    float dropY;
 };

@@ -1,6 +1,9 @@
 #include "ui.h"
 
+#include "audio.h"
+#include "scene.h"
 #include "theme.h"
+#include "timeline.h"
 
 #include <cassert>
 #include <cmath>
@@ -123,6 +126,14 @@ struct UiState {
     float panelCursorY;
     int controlIndex;
     bool suppressBody; // current panel is being torn off: skip its controls
+
+    TimelineClipId timelineDragClip; // clip being moved or trimmed, 0 = none
+    int timelineDragMode;
+    float timelineDragGrabX;      // mouseX when the drag started
+    double timelineDragStartTime; // the clip's values at grab, to offset against
+    double timelineDragDuration;
+    double timelineDragTrimIn;
+    double timelineDragTrimOut;
 
     int hotId;
     int activeId;
@@ -744,6 +755,370 @@ bool ToolButtonWidget(UiState *ui, int id, Rect r, const char *label, bool on) {
     return clicked;
 }
 
+constexpr float kTimelinePixelsPerSecond = 40.0f;
+constexpr float kTimelineTransportHeight = 26.0f;
+constexpr float kTimelineRulerHeight = 28.0f;
+constexpr float kTimelineLaneHeight = 34.0f;
+constexpr float kTimelineHeaderWidth = 150.0f;
+constexpr float kTimelineTrimHandleWidth = 6.0f;
+constexpr float kTimelinePlayheadGrabPx = 5.0f;
+constexpr int kTimelineRulerLabelSeconds = 5;
+constexpr double kTimelineMinClipSeconds = 0.05;
+
+constexpr int kTimelinePlayId = 800010;
+constexpr int kTimelineStopId = 800011;
+constexpr int kTimelinePlayheadId = 800012;
+constexpr int kTimelineClipIdBase = 810000;
+
+enum {
+    TimelineDrag_None = 0,
+    TimelineDrag_Move,
+    TimelineDrag_TrimLeft,
+    TimelineDrag_TrimRight,
+};
+
+// The lanes visible this frame, resolved from the panel body. `rulerX` is the
+// x of transport time 0; everything right of it is time, everything left is the
+// per-track header column.
+struct TimelineLayout {
+    Rect ruler;
+    float rulerX;
+    float rulerRight;
+    float lanesY;
+    float bodyBottom;
+    int laneCount;
+    TrackId laneTracks[kMaxTimelineTracks];
+    TimelineTrack laneInfo[kMaxTimelineTracks];
+};
+
+float TimelineTimeToX(float rulerX, double seconds) {
+    return rulerX + (float)(seconds * kTimelinePixelsPerSecond);
+}
+
+double TimelineXToTime(float rulerX, float x) {
+    double seconds = (double)(x - rulerX) / kTimelinePixelsPerSecond;
+    return seconds < 0.0 ? 0.0 : seconds;
+}
+
+int TimelineLaneAtY(const TimelineLayout &layout, float y) {
+    if (y < layout.lanesY) {
+        return -1;
+    }
+    int lane = (int)((y - layout.lanesY) / kTimelineLaneHeight);
+    return lane < layout.laneCount ? lane : -1;
+}
+
+int TimelineLaneOfTrack(const TimelineLayout &layout, TrackId track) {
+    for (int i = 0; i < layout.laneCount; ++i) {
+        if (layout.laneTracks[i] == track) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void FormatTransportTime(double seconds, char *out, size_t size) {
+    if (seconds < 0.0) {
+        seconds = 0.0;
+    }
+    int centiseconds = (int)(seconds * 100.0);
+    snprintf(out, size, "%02d:%02d.%02d", centiseconds / 6000, (centiseconds / 100) % 60,
+             centiseconds % 100);
+}
+
+// The UI vertex list has no scissor, so clip time-domain rects to the ruler span
+// by hand or they spill into the track headers.
+void PushClippedRect(UiState *ui, Rect r, float clipX0, float clipX1, Color c) {
+    float x0 = r.x < clipX0 ? clipX0 : r.x;
+    float x1 = (r.x + r.w) > clipX1 ? clipX1 : (r.x + r.w);
+    if (x1 <= x0) {
+        return;
+    }
+    PushRect(ui, {x0, r.y, x1 - x0, r.h}, c);
+}
+
+EntityId SelectedAudioSource(const SceneState *scene) {
+    EntityId active = SceneSelection(scene).activeEntity;
+    const Entity *entity = SceneGetEntity(scene, active);
+    if (entity != nullptr && entity->kind == EntityKind_AudioSource) {
+        return active;
+    }
+    return kInvalidEntityId;
+}
+
+void BuildTimelineTransport(UiState *ui, TimelineState *timeline, Rect row) {
+    Rect playRect = {row.x, row.y, 90.0f, row.h};
+    if (Button(ui, kTimelinePlayId, playRect, TimelineIsPlaying(timeline) ? "Pause" : "Play")) {
+        TimelineTogglePlay(timeline);
+    }
+
+    Rect stopRect = {row.x + 96.0f, row.y, 70.0f, row.h};
+    if (Button(ui, kTimelineStopId, stopRect, "Stop")) {
+        TimelineStopToZero(timeline);
+    }
+
+    char readout[16];
+    FormatTransportTime(TimelineTime(timeline), readout, sizeof(readout));
+    PushText(ui, row.x + 178.0f, row.y + (row.h - kGlyphHeight * kTextScale) * 0.5f, readout,
+             kTextCol);
+}
+
+void BuildTimelineRuler(UiState *ui, TimelineState *timeline, const TimelineLayout &layout) {
+    PushRect(ui, layout.ruler, theme::TimelineRuler);
+
+    double endTime = TimelineXToTime(layout.rulerX, layout.rulerRight);
+    for (int second = 0; (double)second <= endTime; ++second) {
+        float x = TimelineTimeToX(layout.rulerX, second);
+        bool labelled = (second % kTimelineRulerLabelSeconds) == 0;
+        float tickHeight = labelled ? 10.0f : 5.0f;
+        PushRect(ui, {x, layout.ruler.y + layout.ruler.h - tickHeight, 1.0f, tickHeight},
+                 theme::TimelineRulerTick);
+        if (!labelled) {
+            continue;
+        }
+        char label[16];
+        snprintf(label, sizeof(label), "%d:%02d", second / 60, second % 60);
+        if (x + TextWidth(label) < layout.rulerRight) {
+            PushText(ui, x + 3.0f, layout.ruler.y + 2.0f, label, kTextShortcut);
+        }
+    }
+
+    float playheadX = TimelineTimeToX(layout.rulerX, TimelineTime(timeline));
+    Rect grab = {playheadX - kTimelinePlayheadGrabPx, layout.ruler.y,
+                 kTimelinePlayheadGrabPx * 2.0f, layout.ruler.h};
+    if (ui->activeId == 0 && ui->mousePressed) {
+        if (PointInRect(ui->mouseX, ui->mouseY, grab)) {
+            ui->activeId = kTimelinePlayheadId;
+        } else if (PointInRect(ui->mouseX, ui->mouseY, layout.ruler)) {
+            TimelineSeek(timeline, TimelineXToTime(layout.rulerX, ui->mouseX));
+        }
+    }
+
+    if (ui->activeId == kTimelinePlayheadId) {
+        TimelineScrub(timeline, TimelineXToTime(layout.rulerX, ui->mouseX));
+        if (ui->mouseReleased) {
+            TimelineScrubEnd(timeline);
+        }
+    }
+}
+
+void DrawTimelineLanes(UiState *ui, const TimelineLayout &layout) {
+    for (int lane = 0; lane < layout.laneCount; ++lane) {
+        float y = layout.lanesY + lane * kTimelineLaneHeight;
+        PushRect(ui, {layout.rulerX, y, layout.rulerRight - layout.rulerX, kTimelineLaneHeight},
+                 (lane % 2) == 0 ? theme::TimelineLaneEven : theme::TimelineLaneOdd);
+
+        Rect header = {layout.rulerX - kTimelineHeaderWidth, y, kTimelineHeaderWidth,
+                       kTimelineLaneHeight};
+        PushRect(ui, header, theme::TimelineLaneHeader);
+
+        float textY = y + (kTimelineLaneHeight - kGlyphHeight * kTextScale) * 0.5f;
+        char name[7];
+        strncpy(name, layout.laneInfo[lane].name, sizeof(name) - 1);
+        name[sizeof(name) - 1] = '\0';
+        PushText(ui, header.x + 6.0f, textY, name, kTextCol);
+
+        bool muted = layout.laneInfo[lane].muted;
+        bool soloed = layout.laneInfo[lane].soloed;
+        Rect mute = {header.x + header.w - 42.0f, textY, 18.0f, 18.0f};
+        Rect solo = {header.x + header.w - 21.0f, textY, 18.0f, 18.0f};
+        PushRect(ui, mute, muted ? kButtonActive : kButtonCol);
+        PushRect(ui, solo, soloed ? kButtonActive : kButtonCol);
+        PushText(ui, mute.x + 1.0f, textY, "M", muted ? kTextCol : kTextDisabled);
+        PushText(ui, solo.x + 1.0f, textY, "S", soloed ? kTextCol : kTextDisabled);
+    }
+}
+
+void BuildTimelineClips(UiState *ui, TimelineState *timeline, SceneState *scene,
+                        const TimelineLayout &layout) {
+    int clipCount = TimelineClipCount(timeline);
+    for (int i = 0; i < clipCount; ++i) {
+        TimelineClipId id = kInvalidTimelineClipId;
+        TimelineClip clip;
+        if (!TimelineClipAt(timeline, i, &id, &clip)) {
+            continue;
+        }
+        int lane = TimelineLaneOfTrack(layout, clip.track);
+        if (lane < 0) {
+            continue;
+        }
+
+        double startTime = clip.startTime;
+        double duration = clip.duration;
+        int drawLane = lane;
+        bool dragging = ui->timelineDragClip == id && ui->timelineDragMode != TimelineDrag_None;
+        if (dragging) {
+            double delta =
+                (double)(ui->mouseX - ui->timelineDragGrabX) / kTimelinePixelsPerSecond;
+            if (ui->timelineDragMode == TimelineDrag_Move) {
+                startTime = ui->timelineDragStartTime + delta;
+                if (startTime < 0.0) {
+                    startTime = 0.0;
+                }
+                int hoverLane = TimelineLaneAtY(layout, ui->mouseY);
+                if (hoverLane >= 0) {
+                    drawLane = hoverLane;
+                }
+            } else if (ui->timelineDragMode == TimelineDrag_TrimRight) {
+                duration = ui->timelineDragDuration + delta;
+                if (duration < kTimelineMinClipSeconds) {
+                    duration = kTimelineMinClipSeconds;
+                }
+            } else {
+                double shift = delta;
+                double maxShift = ui->timelineDragDuration - kTimelineMinClipSeconds;
+                if (shift > maxShift) {
+                    shift = maxShift;
+                }
+                if (shift < -ui->timelineDragTrimIn) {
+                    shift = -ui->timelineDragTrimIn;
+                }
+                startTime = ui->timelineDragStartTime + shift;
+                duration = ui->timelineDragDuration - shift;
+            }
+        }
+
+        float laneY = layout.lanesY + drawLane * kTimelineLaneHeight;
+        Rect r = {TimelineTimeToX(layout.rulerX, startTime), laneY + 3.0f,
+                  (float)(duration * kTimelinePixelsPerSecond), kTimelineLaneHeight - 6.0f};
+
+        bool selected = SceneSelectionContains(scene, TimelineClipSelectionItem(id));
+        if (ui->activeId == 0 && ui->mousePressed && PointInRect(ui->mouseX, ui->mouseY, r)) {
+            SelectionItem item = TimelineClipSelectionItem(id);
+            SceneSelectionSet(scene, &item, 1);
+            selected = true;
+
+            ui->activeId = kTimelineClipIdBase + i;
+            ui->timelineDragClip = id;
+            ui->timelineDragGrabX = ui->mouseX;
+            ui->timelineDragStartTime = clip.startTime;
+            ui->timelineDragDuration = clip.duration;
+            ui->timelineDragTrimIn = clip.trimIn;
+            ui->timelineDragTrimOut = clip.trimOut;
+            if (ui->mouseX < r.x + kTimelineTrimHandleWidth) {
+                ui->timelineDragMode = TimelineDrag_TrimLeft;
+            } else if (ui->mouseX > r.x + r.w - kTimelineTrimHandleWidth) {
+                ui->timelineDragMode = TimelineDrag_TrimRight;
+            } else {
+                ui->timelineDragMode = TimelineDrag_Move;
+            }
+        }
+
+        PushClippedRect(ui, r, layout.rulerX, layout.rulerRight,
+                        selected ? theme::TimelineClipSelected : theme::TimelineClip);
+        PushClippedRect(ui, {r.x, r.y, kTimelineTrimHandleWidth, r.h}, layout.rulerX,
+                        layout.rulerRight, theme::TimelineClipTrimHandle);
+        PushClippedRect(ui, {r.x + r.w - kTimelineTrimHandleWidth, r.y, kTimelineTrimHandleWidth,
+                             r.h},
+                        layout.rulerX, layout.rulerRight, theme::TimelineClipTrimHandle);
+
+        if (dragging && ui->mouseReleased) {
+            if (ui->timelineDragMode == TimelineDrag_Move) {
+                TimelineSubmitMoveClip(timeline, scene, id, layout.laneTracks[drawLane], startTime);
+            } else if (ui->timelineDragMode == TimelineDrag_TrimRight) {
+                double trimmed = ui->timelineDragDuration - duration;
+                TimelineSubmitTrimClip(timeline, scene, id, ui->timelineDragTrimIn,
+                                       ui->timelineDragTrimOut + trimmed, duration);
+            } else {
+                double shift = startTime - ui->timelineDragStartTime;
+                TimelineSubmitTrimClip(timeline, scene, id, ui->timelineDragTrimIn + shift,
+                                       ui->timelineDragTrimOut, duration);
+            }
+            ui->timelineDragClip = kInvalidTimelineClipId;
+            ui->timelineDragMode = TimelineDrag_None;
+        }
+    }
+}
+
+void DrawTimelinePlayhead(UiState *ui, TimelineState *timeline, const TimelineLayout &layout) {
+    float x = TimelineTimeToX(layout.rulerX, TimelineTime(timeline));
+    if (x < layout.rulerX || x > layout.rulerRight) {
+        return;
+    }
+    float bottom = layout.lanesY + layout.laneCount * kTimelineLaneHeight;
+    PushRect(ui, {x, layout.ruler.y, 2.0f, bottom - layout.ruler.y}, theme::Playhead);
+}
+
+// A .wav dropped on a lane becomes a clip there; dropped past the last lane it
+// gets a fresh track, bound to the selected audio source when there is one.
+void HandleTimelineDrop(UiState *ui, FrameInput input, const TimelineLayout &layout) {
+    if (input.droppedFileCount <= 0 || ui->editor.audio == nullptr) {
+        return;
+    }
+    if (input.dropX < layout.rulerX || input.dropX > layout.rulerRight) {
+        return;
+    }
+    if (input.dropY < layout.lanesY || input.dropY > layout.bodyBottom) {
+        return;
+    }
+
+    int lane = TimelineLaneAtY(layout, input.dropY);
+    TrackId track = lane >= 0 ? layout.laneTracks[lane] : kInvalidTrackId;
+    double dropTime = TimelineXToTime(layout.rulerX, input.dropX);
+
+    for (int i = 0; i < input.droppedFileCount; ++i) {
+        ClipId wav = AudioLoadClip(ui->editor.audio, input.droppedFiles[i]);
+        if (!ClipIdValid(wav)) {
+            continue;
+        }
+        if (track == kInvalidTrackId) {
+            track = TimelineSubmitAddTrack(ui->editor.timeline, ui->editor.scene,
+                                           SelectedAudioSource(ui->editor.scene), "Track");
+            if (track == kInvalidTrackId) {
+                return;
+            }
+        }
+        double duration = AudioClipDuration(ui->editor.audio, wav);
+        TimelineSubmitCreateClip(ui->editor.timeline, ui->editor.scene, track, wav, dropTime,
+                                 duration);
+        dropTime += duration;
+    }
+}
+
+void BuildTimelineBody(UiState *ui, FrameInput input) {
+    TimelineState *timeline = ui->editor.timeline;
+    SceneState *scene = ui->editor.scene;
+    if (ui->suppressBody || timeline == nullptr || scene == nullptr) {
+        return;
+    }
+
+    Rect body = ui->currentBody;
+    float lanesY = body.y + kTimelineTransportHeight + kRowGap + kTimelineRulerHeight;
+    if (body.w < kTimelineHeaderWidth + 120.0f || body.h < kTimelineTransportHeight) {
+        return;
+    }
+
+    TimelineLayout layout;
+    layout.rulerX = body.x + kTimelineHeaderWidth;
+    layout.rulerRight = body.x + body.w;
+    layout.ruler = {layout.rulerX, body.y + kTimelineTransportHeight + kRowGap,
+                    layout.rulerRight - layout.rulerX, kTimelineRulerHeight};
+    layout.lanesY = lanesY;
+    layout.bodyBottom = body.y + body.h;
+
+    int visibleLanes = (int)((layout.bodyBottom - lanesY) / kTimelineLaneHeight);
+    if (visibleLanes < 0) {
+        visibleLanes = 0;
+    }
+    int trackCount = TimelineTrackCount(timeline);
+    layout.laneCount = trackCount < visibleLanes ? trackCount : visibleLanes;
+    for (int i = 0; i < layout.laneCount; ++i) {
+        TimelineTrackAt(timeline, i, &layout.laneTracks[i], &layout.laneInfo[i]);
+    }
+
+    BuildTimelineTransport(ui, timeline, {body.x, body.y, body.w, kTimelineTransportHeight});
+    BuildTimelineRuler(ui, timeline, layout);
+    DrawTimelineLanes(ui, layout);
+    BuildTimelineClips(ui, timeline, scene, layout);
+    DrawTimelinePlayhead(ui, timeline, layout);
+    HandleTimelineDrop(ui, input, layout);
+
+    if (ui->timelineDragMode != TimelineDrag_None && !ui->mouseDown) {
+        ui->timelineDragClip = kInvalidTimelineClipId; // the clip went away mid-drag
+        ui->timelineDragMode = TimelineDrag_None;
+    }
+}
+
 void BuildToolbar(UiState *ui) {
     ui->toolbarRect = {0.0f, 0.0f, 0.0f, 0.0f};
     Rect content = ui->contentRect;
@@ -841,6 +1216,10 @@ void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiD
     snprintf(line, sizeof(line), "Win  %d x %d", (int)ui->drawableWidth, (int)ui->drawableHeight);
     UiPanelText(ui, line);
     UiPanelButton(ui, "Reset Camera");
+    UiEndPanel(ui);
+
+    UiBeginPanel(ui, 3, "Timeline", UiDock_Bottom, 240.0f);
+    BuildTimelineBody(ui, input);
     UiEndPanel(ui);
 
     if (ui->draggedPanel != 0) {
