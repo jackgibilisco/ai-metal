@@ -6,6 +6,32 @@ struct Vec3 {
     float x, y, z;
 };
 
+inline Vec3 Vec3Add(Vec3 a, Vec3 b) { return Vec3{a.x + b.x, a.y + b.y, a.z + b.z}; }
+inline Vec3 Vec3Sub(Vec3 a, Vec3 b) { return Vec3{a.x - b.x, a.y - b.y, a.z - b.z}; }
+inline Vec3 Vec3Scale(Vec3 a, float s) { return Vec3{a.x * s, a.y * s, a.z * s}; }
+inline Vec3 Vec3MulComponents(Vec3 a, Vec3 b) { return Vec3{a.x * b.x, a.y * b.y, a.z * b.z}; }
+inline float Vec3Dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+inline Vec3 Vec3Cross(Vec3 a, Vec3 b) {
+    return Vec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+inline float Vec3Length(Vec3 a) { return sqrtf(Vec3Dot(a, a)); }
+
+inline Vec3 Vec3Normalize(Vec3 a) {
+    float length = Vec3Length(a);
+    if (length <= 1e-8f) {
+        return Vec3{0.0f, 0.0f, 0.0f};
+    }
+    return Vec3Scale(a, 1.0f / length);
+}
+
+// Unit quaternion, column-vector convention matching the Mat4 helpers:
+// QuatMul(a, b) applies b first, then a, like Mat4Multiply(A, B).
+struct Quat {
+    float x, y, z, w;
+};
+
 // Column-major 4x4, matching the layout Metal Shading Language expects
 // for float4x4 when the bytes are copied straight into a uniform buffer.
 struct Mat4 {
@@ -148,4 +174,123 @@ inline Mat4 Mat4LookAt(Vec3 eye, Vec3 target, Vec3 up) {
     result.m[13] = -(yAxis.x * eye.x + yAxis.y * eye.y + yAxis.z * eye.z);
     result.m[14] = -(zAxis.x * eye.x + zAxis.y * eye.y + zAxis.z * eye.z);
     return result;
+}
+
+inline Quat QuatIdentity() { return Quat{0.0f, 0.0f, 0.0f, 1.0f}; }
+
+inline Quat QuatFromAxisAngle(Vec3 axis, float radians) {
+    Vec3 unit = Vec3Normalize(axis);
+    float half = radians * 0.5f;
+    float s = sinf(half);
+    return Quat{unit.x * s, unit.y * s, unit.z * s, cosf(half)};
+}
+
+// Applies b first, then a (matches Mat4Multiply ordering).
+inline Quat QuatMul(Quat a, Quat b) {
+    return Quat{
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    };
+}
+
+inline Quat QuatNormalize(Quat q) {
+    float length = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (length <= 1e-8f) {
+        return QuatIdentity();
+    }
+    float inv = 1.0f / length;
+    return Quat{q.x * inv, q.y * inv, q.z * inv, q.w * inv};
+}
+
+inline Quat QuatConjugate(Quat q) { return Quat{-q.x, -q.y, -q.z, q.w}; }
+
+inline Vec3 QuatRotate(Quat q, Vec3 v) {
+    Vec3 u = Vec3{q.x, q.y, q.z};
+    Vec3 t = Vec3Scale(Vec3Cross(u, v), 2.0f);
+    return Vec3Add(v, Vec3Add(Vec3Scale(t, q.w), Vec3Cross(u, t)));
+}
+
+inline Mat4 QuatToMat4(Quat q) {
+    Quat n = QuatNormalize(q);
+    float xx = n.x * n.x, yy = n.y * n.y, zz = n.z * n.z;
+    float xy = n.x * n.y, xz = n.x * n.z, yz = n.y * n.z;
+    float wx = n.w * n.x, wy = n.w * n.y, wz = n.w * n.z;
+
+    Mat4 result = Mat4Identity();
+    result.m[0] = 1.0f - 2.0f * (yy + zz);
+    result.m[1] = 2.0f * (xy + wz);
+    result.m[2] = 2.0f * (xz - wy);
+    result.m[4] = 2.0f * (xy - wz);
+    result.m[5] = 1.0f - 2.0f * (xx + zz);
+    result.m[6] = 2.0f * (yz + wx);
+    result.m[8] = 2.0f * (xz + wy);
+    result.m[9] = 2.0f * (yz - wx);
+    result.m[10] = 1.0f - 2.0f * (xx + yy);
+    return result;
+}
+
+// Extracts the rotation from the upper-left 3x3 of a (rotation-only) matrix.
+// Inverse of QuatToMat4; used by the .blend importer, which builds rotation
+// as a Mat4.
+inline Quat QuatFromMat4(const Mat4 &m) {
+    float m00 = m.m[0], m10 = m.m[1], m20 = m.m[2];
+    float m01 = m.m[4], m11 = m.m[5], m21 = m.m[6];
+    float m02 = m.m[8], m12 = m.m[9], m22 = m.m[10];
+    float trace = m00 + m11 + m22;
+    Quat q;
+    if (trace > 0.0f) {
+        float s = sqrtf(trace + 1.0f) * 2.0f;
+        q.w = 0.25f * s;
+        q.x = (m21 - m12) / s;
+        q.y = (m02 - m20) / s;
+        q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        float s = sqrtf(1.0f + m00 - m11 - m22) * 2.0f;
+        q.w = (m21 - m12) / s;
+        q.x = 0.25f * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        float s = sqrtf(1.0f + m11 - m00 - m22) * 2.0f;
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25f * s;
+        q.z = (m12 + m21) / s;
+    } else {
+        float s = sqrtf(1.0f + m22 - m00 - m11) * 2.0f;
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25f * s;
+    }
+    return QuatNormalize(q);
+}
+
+inline Quat QuatSlerp(Quat a, Quat b, float t) {
+    float dot = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    if (dot < 0.0f) {
+        b = Quat{-b.x, -b.y, -b.z, -b.w};
+        dot = -dot;
+    }
+    if (dot > 0.9995f) {
+        return QuatNormalize(Quat{
+            a.x + t * (b.x - a.x),
+            a.y + t * (b.y - a.y),
+            a.z + t * (b.z - a.z),
+            a.w + t * (b.w - a.w),
+        });
+    }
+    float theta0 = acosf(dot);
+    float theta = theta0 * t;
+    float sinTheta0 = sinf(theta0);
+    float scaleA = cosf(theta) - dot * sinf(theta) / sinTheta0;
+    float scaleB = sinf(theta) / sinTheta0;
+    return Quat{
+        scaleA * a.x + scaleB * b.x,
+        scaleA * a.y + scaleB * b.y,
+        scaleA * a.z + scaleB * b.z,
+        scaleA * a.w + scaleB * b.w,
+    };
 }

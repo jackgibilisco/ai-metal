@@ -4,10 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A barebones, macOS-only Metal renderer in C-style C++ / Objective-C++. It
-opens a window and draws 3 cubes that spin in place. There is no engine, no
-asset pipeline, no scene graph — just enough to prove the platform/game/
-renderer split works.
+A macOS-only Metal renderer in C-style C++ / Objective-C++, being grown into
+a 3D scene editor for spatial audio. It opens a window on a default test
+scene (ground plane, two occluder cubes, two audio sources, one active
+listener) with a deferred renderer, an orbit camera, a tool toolbar, and the
+scene / audio / timeline modules wired in. See `docs/scene-editor-plan.md`
+for what has landed and what is still pending (timeline panel UI, gizmo
+viewport interaction + draw, wav drag-drop).
 
 ## Build and run
 
@@ -22,17 +25,19 @@ string embedded in `src/renderer_metal.mm` and compiled at runtime via
 `newLibraryWithSource:`. `clang++` alone (via the Xcode command line tools)
 is enough to build.
 
-There is no test suite; verification is running the binary and confirming 3
-distinct, independently-rotating cubes render without a crash or Metal
-validation error in the console output, alongside two dockable UI panels
-("Controls" right, "Scene" left) with title bars that shrink the 3D
-viewport; drag a title bar to tear a panel off and re-dock or float it. The
-`o` key cycles the ambient-occlusion debug view (normal / raw
-AO buffer / AO disabled); the `f` key toggles the FXAA post pass; the `p`
-key pauses/resumes the cube spin (with spin paused and no UI interaction the
-renderer stops redrawing); `F3` toggles the frame-timing debug HUD (which
-also shows per-pass GPU time); ⌃⌘F (View menu) toggles borderless
-fullscreen. In fullscreen an in-app menu strip appears at the top
+Verification is running the binary and confirming the default scene (ground
+plane + two occluder cubes) renders without a crash or Metal validation
+error in the console output, alongside two dockable UI panels ("Controls"
+right, "Scene" left) with title bars that shrink the 3D viewport; drag a
+title bar to tear a panel off and re-dock or float it. A tool toolbar
+overlays the top-left of the viewport (Select / Translate / Rotate / Scale /
+Add Source / Add Listener / Snap). The `o` key cycles the ambient-occlusion
+debug view (normal / raw AO buffer / AO disabled); the `f` key toggles the
+FXAA post pass; the spacebar toggles the timeline transport (the editor's
+global sim clock — while paused, sim/audio time holds but the camera still
+orbits); `F3` toggles the frame-timing debug HUD (which also shows per-pass
+GPU time); ⌃⌘F (View menu) toggles borderless fullscreen. `tests/` holds
+headless unit tests (not in the Makefile; build them standalone). In fullscreen an in-app menu strip appears at the top
 (mirroring the hidden macOS menu bar); View > Toggle Menu Bar also shows it
 while windowed. The frame loop pauses entirely when the app is inactive or
 its window is minimized/occluded.

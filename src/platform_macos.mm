@@ -13,7 +13,7 @@
 #include "gpu_metal.h"
 
 namespace {
-constexpr size_t kArenaSize = 64 * 1024 * 1024;
+constexpr size_t kArenaSize = 192 * 1024 * 1024;
 constexpr CGFloat kWindowWidth = 960;
 constexpr CGFloat kWindowHeight = 600;
 constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float;
@@ -51,7 +51,6 @@ constexpr float kMouseWheelZoom = 0.05f;
 @property(nonatomic) BOOL pendingCycleDebug;
 @property(nonatomic) BOOL pendingToggleFxaa;
 @property(nonatomic) BOOL pendingToggleHud;
-@property(nonatomic) BOOL pendingToggleSpin;
 @property(nonatomic) float pendingMouseX; // backing pixels, top-left origin
 @property(nonatomic) float pendingMouseY;
 @property(nonatomic) BOOL pendingMouseLeftDown;
@@ -132,10 +131,6 @@ constexpr float kMouseWheelZoom = 0.05f;
     }
     if (event.keyCode == 99) { // F3
         self.pendingToggleHud = YES;
-        return;
-    }
-    if (plainKey && [event.charactersIgnoringModifiers isEqualToString:@"p"]) {
-        self.pendingToggleSpin = YES;
         return;
     }
     if (event.keyCode == 53 && self.inFullscreen && self.onToggleFullscreen) { // Escape
@@ -404,7 +399,6 @@ constexpr float kMouseWheelZoom = 0.05f;
         .orbitPitch = metalView.pendingOrbitPitch,
         .cycleDebugView = (bool)metalView.pendingCycleDebug,
         .toggleFxaa = (bool)metalView.pendingToggleFxaa,
-        .toggleSpin = (bool)metalView.pendingToggleSpin,
         .mouseX = metalView.pendingMouseX,
         .mouseY = metalView.pendingMouseY,
         .mouseLeftDown = (bool)metalView.pendingMouseLeftDown,
@@ -429,7 +423,6 @@ constexpr float kMouseWheelZoom = 0.05f;
     metalView.pendingScrollY = 0.0f;
     metalView.pendingCycleDebug = NO;
     metalView.pendingToggleFxaa = NO;
-    metalView.pendingToggleSpin = NO;
 
     if (metalView.pendingToggleHud) {
         self.hudView.hidden = !self.hudView.hidden;

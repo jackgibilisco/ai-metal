@@ -22,7 +22,6 @@ struct FrameInput {
     float orbitPitch;
     bool cycleDebugView; // one keypress: advance the AO debug view mode
     bool toggleFxaa;     // one keypress: enable/disable the FXAA post pass
-    bool toggleSpin;     // one keypress: pause/resume scene spin (renderer ignores it)
 
     // Cursor in backing pixels with a top-left origin (the drawable's space).
     float mouseX;

@@ -571,7 +571,7 @@ RendererState *RendererInit(Arena *arena, GpuContext *gpu, float drawableWidth,
     state->planeIndexBuffer = [device newBufferWithBytes:kPlaneIndices
                                                     length:sizeof(kPlaneIndices)
                                                    options:MTLResourceStorageModeShared];
-    state->uniformBuffer = [device newBufferWithLength:kUniformStride * kMaxSceneObjects
+    state->uniformBuffer = [device newBufferWithLength:kUniformStride * kMaxMeshRenderers
                                                 options:MTLResourceStorageModeShared];
 
     NSError *error = nil;
@@ -690,9 +690,13 @@ void RendererUpdateCamera(RendererState *renderer, FrameInput input) {
     renderer->viewProjection = Mat4Multiply(renderer->projection, renderer->view);
 }
 
+Vec3 RendererCameraFocus(const RendererState *renderer) {
+    return renderer->cameraTarget;
+}
+
 namespace {
 
-void EncodeGeometryPass(RendererState *renderer, const GameState *game, id<MTLCommandBuffer> commandBuffer) {
+void EncodeGeometryPass(RendererState *renderer, const SceneState *scene, id<MTLCommandBuffer> commandBuffer) {
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = renderer->gNormalTexture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -712,12 +716,14 @@ void EncodeGeometryPass(RendererState *renderer, const GameState *game, id<MTLCo
     [encoder setCullMode:MTLCullModeBack];
     [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
 
-    uint8_t *uniformContents = (uint8_t *)[renderer->uniformBuffer contents];
-    for (int i = 0; i < game->objectCount; ++i) {
-        const SceneObject &object = game->objects[i];
+    static SceneMeshView meshViews[kMaxMeshRenderers];
+    int meshCount = SceneMeshRenderers(scene, meshViews, kMaxMeshRenderers);
 
-        Mat4 model = Mat4Multiply(Mat4Translation(object.position),
-                                   Mat4Multiply(object.rotation, Mat4Scale(object.scale)));
+    uint8_t *uniformContents = (uint8_t *)[renderer->uniformBuffer contents];
+    for (int i = 0; i < meshCount; ++i) {
+        const SceneMeshView &object = meshViews[i];
+
+        Mat4 model = object.model;
 
         GeoUniforms uniforms;
         uniforms.modelViewProjection = Mat4Multiply(renderer->viewProjection, model);
@@ -726,7 +732,7 @@ void EncodeGeometryPass(RendererState *renderer, const GameState *game, id<MTLCo
         size_t offset = i * kUniformStride;
         memcpy(uniformContents + offset, &uniforms, sizeof(GeoUniforms));
 
-        bool isCube = object.primitive == Primitive::Cube;
+        bool isCube = object.mesh == MeshId_Cube;
         id<MTLBuffer> vertexBuffer = isCube ? renderer->cubeVertexBuffer : renderer->planeVertexBuffer;
         id<MTLBuffer> indexBuffer = isCube ? renderer->cubeIndexBuffer : renderer->planeIndexBuffer;
         uint32_t indexCount = isCube ? renderer->cubeIndexCount : renderer->planeIndexCount;
@@ -849,7 +855,7 @@ void ResolvePassTimings(RendererState *renderer, uint32_t encodedSlotMask,
 
 } // namespace
 
-void RendererRender(RendererState *renderer, const GameState *game, RenderTarget *targetPtr) {
+void RendererRender(RendererState *renderer, const SceneState *scene, RenderTarget *targetPtr) {
     RenderTarget target = *targetPtr;
     bool aoEnabled = renderer->debugMode != 2;
     bool fxaaEnabled = renderer->fxaaEnabled;
@@ -860,7 +866,7 @@ void RendererRender(RendererState *renderer, const GameState *game, RenderTarget
                                    (double)renderer->screenWidth, (double)renderer->screenHeight,
                                    0.0, 1.0};
 
-    EncodeGeometryPass(renderer, game, target.commandBuffer);
+    EncodeGeometryPass(renderer, scene, target.commandBuffer);
     if (aoEnabled) {
         EncodeAoPass(renderer, target.commandBuffer);
     }

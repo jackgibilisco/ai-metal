@@ -44,6 +44,42 @@ void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiD
 // Reading it clears it.
 CommandId UiTakeCommand(UiState *ui);
 
+// 3D-editor toolbar. The app owns the editor's tool mode, the snap flag, and
+// the placement actions (Remus's add-source / add-listener, frame-selected). It
+// hands pointers + callbacks to the UI once per frame via UiSetEditorState,
+// before UiBuildFrame. Any field left null makes its button inert, so the
+// toolbar still builds before the scene module is wired.
+//
+// The tool-mode values mirror the scene module's tool-mode enum; the toolbar
+// only ever writes one of these into *toolMode.
+enum {
+    UiTool_Select = 0,
+    UiTool_Translate,
+    UiTool_Rotate,
+    UiTool_Scale,
+};
+
+struct TimelineState;
+struct SceneState;
+struct AudioState;
+
+struct UiEditorState {
+    int *toolMode;    // scene-owned tool-mode enum; the tool buttons set it
+    bool *snapEnabled; // app-owned snap flag; the Snap button toggles it
+    void (*addSource)(void *context);
+    void (*addListener)(void *context);
+    void (*frameSelected)(void *context);
+    void *context;
+
+    // Timeline panel bindings. Null until the scene/audio modules are wired;
+    // the panel then reads/draws the timeline and submits undoable edits.
+    TimelineState *timeline;
+    SceneState *scene;
+    AudioState *audio;
+};
+
+void UiSetEditorState(UiState *ui, UiEditorState editor);
+
 // Panels. A panel is a titled, dockable, tear-off container: drag its title
 // bar to move it, drop near a screen edge to dock or anywhere else to float.
 // `id` is a stable nonzero caller value; `initialDock` / `initialSize` apply

@@ -1,10 +1,10 @@
 CXX := clang++
 ZSTD_PREFIX := $(shell brew --prefix zstd)
 CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -fobjc-arc -I$(ZSTD_PREFIX)/include
-FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework UniformTypeIdentifiers
+FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework UniformTypeIdentifiers -framework CoreAudio -framework AudioToolbox -framework AudioUnit
 LDFLAGS := -L$(ZSTD_PREFIX)/lib -lzstd
 
-SRC_CPP := src/arena.cpp src/game.cpp src/scene_import.cpp src/blend_file.cpp src/menu.cpp src/ui.cpp src/app.cpp
+SRC_CPP := src/arena.cpp src/scene.cpp src/audio.cpp src/timeline.cpp src/gizmo.cpp src/game.cpp src/scene_import.cpp src/blend_file.cpp src/menu.cpp src/ui.cpp src/app.cpp
 SRC_MM := src/renderer_metal.mm src/ui_render_metal.mm src/platform_macos.mm
 
 BUILD_DIR := build

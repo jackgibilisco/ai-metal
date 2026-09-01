@@ -8,8 +8,8 @@
 
 #include "arena.h"
 #include "frame_input.h"
-#include "game.h"
 #include "gpu.h"
+#include "scene.h"
 
 struct RendererState;
 
@@ -35,5 +35,9 @@ RendererState *RendererInit(Arena *arena, GpuContext *gpu, float drawableWidth,
 void RendererSetContentRect(RendererState *renderer, float originX, float originY, float width,
                             float height);
 void RendererUpdateCamera(RendererState *renderer, FrameInput input);
-void RendererRender(RendererState *renderer, const GameState *game, RenderTarget *target);
+
+// The orbit camera's focus point (world space) — where new entities drop when
+// the placement ray has no better hit.
+Vec3 RendererCameraFocus(const RendererState *renderer);
+void RendererRender(RendererState *renderer, const SceneState *scene, RenderTarget *target);
 RendererPassTimings RendererLastFrameTimings(const RendererState *renderer);

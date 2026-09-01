@@ -1,5 +1,7 @@
 #include "ui.h"
 
+#include "theme.h"
+
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -40,31 +42,32 @@ constexpr float kFloatMinH = 90.0f;
 
 constexpr int kMaxVertices = 65536;
 
-struct Color {
-    unsigned char r, g, b, a;
-};
+// Every color value lives in theme.h. These names are the local spelling the
+// draw code below already uses; each is exactly one palette entry.
+using Color = theme::Color;
 
-constexpr Color kPanelBg = {28, 30, 34, 255};
-constexpr Color kTitleBarCol = {40, 44, 51, 255};
-constexpr Color kTitleBarHot = {54, 59, 69, 255};
-constexpr Color kPanelBorderCol = {62, 66, 75, 255};
-constexpr Color kResizeGripCol = {58, 62, 70, 255};
-constexpr Color kResizeGripHot = {92, 142, 222, 255};
-constexpr Color kDragOutlineCol = {96, 150, 232, 255};
-constexpr Color kButtonCol = {52, 57, 66, 255};
-constexpr Color kButtonHot = {70, 77, 90, 255};
-constexpr Color kButtonActive = {92, 142, 222, 255};
-constexpr Color kTrackCol = {42, 46, 53, 255};
-constexpr Color kHandleCol = {126, 174, 236, 255};
-constexpr Color kHandleHot = {170, 202, 244, 255};
-constexpr Color kTextCol = {224, 227, 232, 255};
-constexpr Color kTextDisabled = {120, 124, 130, 255};
-constexpr Color kTextShortcut = {148, 152, 158, 255};
-constexpr Color kMenuBarBg = {22, 24, 27, 255};
-constexpr Color kMenuTitleHot = {70, 77, 90, 255};
-constexpr Color kMenuTitleOpen = {92, 142, 222, 255};
-constexpr Color kMenuDropdownBg = {38, 41, 46, 255};
-constexpr Color kMenuItemHot = {70, 77, 90, 255};
+constexpr Color kPanelBg = theme::PanelBg;
+constexpr Color kTitleBarCol = theme::TitleBar;
+constexpr Color kTitleBarHot = theme::TitleBarHot;
+constexpr Color kPanelBorderCol = theme::PanelBorder;
+constexpr Color kResizeGripCol = theme::ResizeGrip;
+constexpr Color kResizeGripHot = theme::ResizeGripHot;
+constexpr Color kDragOutlineCol = theme::DragOutline;
+constexpr Color kButtonCol = theme::Button;
+constexpr Color kButtonHot = theme::ButtonHot;
+constexpr Color kButtonActive = theme::ButtonActive;
+constexpr Color kTrackCol = theme::SliderTrack;
+constexpr Color kHandleCol = theme::SliderHandle;
+constexpr Color kHandleHot = theme::SliderHandleHot;
+constexpr Color kTextCol = theme::Text;
+constexpr Color kTextDisabled = theme::TextDisabled;
+constexpr Color kTextShortcut = theme::TextShortcut;
+constexpr Color kMenuBarBg = theme::MenuBarBg;
+constexpr Color kMenuTitleHot = theme::MenuTitleHot;
+constexpr Color kMenuTitleOpen = theme::MenuTitleOpen;
+constexpr Color kMenuDropdownBg = theme::MenuDropdownBg;
+constexpr Color kMenuItemHot = theme::MenuItemHot;
+constexpr Color kMenuSeparatorCol = theme::MenuSeparator;
 
 struct Rect {
     float x, y, w, h;
@@ -102,6 +105,9 @@ struct UiState {
     PanelState panels[kMaxPanels];
     Rect panelRects[kMaxPanels]; // resolved this frame; parallel to panels[]
     Rect contentRect;            // the 3D viewport: drawable minus strip and docked panels
+
+    UiEditorState editor;   // set each frame by the app; zero until then
+    Rect toolbarRect;       // the viewport toolbar strip, resolved this frame
 
     int draggedPanel;  // id, 0 = none (retained across frames while held)
     float dragGrabX;   // cursor offset within the title bar at grab
@@ -387,7 +393,7 @@ void MenuDraw(UiState *ui) {
         if (command == nullptr) {
             float lineY = row.y + kMenuRowHeight * 0.5f;
             PushRect(ui, {row.x + kMenuDropdownPadX, lineY, row.w - kMenuDropdownPadX * 2.0f, 1.0f},
-                     kMenuTitleHot);
+                     kMenuSeparatorCol);
             continue;
         }
 
@@ -646,6 +652,137 @@ void UpdatePanelInteraction(UiState *ui) {
     }
 }
 
+// ---- 3D-editor toolbar ----------------------------------------------
+
+enum { ToolBtn_Mode, ToolBtn_Action, ToolBtn_Toggle };
+
+struct ToolButtonDef {
+    const char *label;
+    int kind;
+    int modeValue;                       // ToolBtn_Mode: value written into *editor.toolMode
+    void (*run)(const UiEditorState *e);  // ToolBtn_Action / ToolBtn_Toggle
+    bool (*isOn)(const UiEditorState *e); // extra highlight test (ToolBtn_Toggle)
+};
+
+void ToolRunAddSource(const UiEditorState *e) {
+    if (e->addSource != nullptr) {
+        e->addSource(e->context);
+    }
+}
+
+void ToolRunAddListener(const UiEditorState *e) {
+    if (e->addListener != nullptr) {
+        e->addListener(e->context);
+    }
+}
+
+void ToolRunFrameSelected(const UiEditorState *e) {
+    if (e->frameSelected != nullptr) {
+        e->frameSelected(e->context);
+    }
+}
+
+void ToolRunToggleSnap(const UiEditorState *e) {
+    if (e->snapEnabled != nullptr) {
+        *e->snapEnabled = !*e->snapEnabled;
+    }
+}
+
+bool ToolSnapOn(const UiEditorState *e) {
+    return e->snapEnabled != nullptr && *e->snapEnabled;
+}
+
+const ToolButtonDef kToolButtons[] = {
+    {"Select", ToolBtn_Mode, UiTool_Select, nullptr, nullptr},
+    {"Translate", ToolBtn_Mode, UiTool_Translate, nullptr, nullptr},
+    {"Rotate", ToolBtn_Mode, UiTool_Rotate, nullptr, nullptr},
+    {"Scale", ToolBtn_Mode, UiTool_Scale, nullptr, nullptr},
+    {"Add Source", ToolBtn_Action, 0, ToolRunAddSource, nullptr},
+    {"Add Listener", ToolBtn_Action, 0, ToolRunAddListener, nullptr},
+    {"Snap", ToolBtn_Toggle, 0, ToolRunToggleSnap, ToolSnapOn},
+    {"Frame Selected", ToolBtn_Action, 0, ToolRunFrameSelected, nullptr},
+};
+constexpr int kToolButtonCount = (int)(sizeof(kToolButtons) / sizeof(kToolButtons[0]));
+
+constexpr float kToolbarMargin = 10.0f;
+constexpr float kToolbarInsetX = 12.0f;
+constexpr float kToolButtonHeight = 26.0f;
+constexpr float kToolButtonGap = 4.0f;
+constexpr float kToolbarInsetY = 6.0f;
+
+bool ToolButtonOn(const ToolButtonDef &def, const UiEditorState *e) {
+    if (def.kind == ToolBtn_Mode) {
+        return e->toolMode != nullptr && *e->toolMode == def.modeValue;
+    }
+    if (def.isOn != nullptr) {
+        return def.isOn(e);
+    }
+    return false;
+}
+
+bool ToolButtonWidget(UiState *ui, int id, Rect r, const char *label, bool on) {
+    bool inside = PointInRect(ui->mouseX, ui->mouseY, r);
+    if (inside) {
+        ui->hotId = id;
+    }
+    if (inside && ui->mousePressed) {
+        ui->activeId = id;
+    }
+    bool clicked = ui->activeId == id && ui->mouseReleased && inside;
+
+    Color background = theme::ToolButton;
+    if (on || (ui->activeId == id && ui->mouseDown && inside)) {
+        background = theme::ToolButtonActive;
+    } else if (ui->hotId == id) {
+        background = theme::ToolButtonHot;
+    }
+    PushRect(ui, r, background);
+
+    float textX = r.x + (r.w - TextWidth(label)) * 0.5f;
+    float textY = r.y + (r.h - kGlyphHeight * kTextScale) * 0.5f;
+    PushText(ui, textX, textY, label, kTextCol);
+    return clicked;
+}
+
+void BuildToolbar(UiState *ui) {
+    ui->toolbarRect = {0.0f, 0.0f, 0.0f, 0.0f};
+    Rect content = ui->contentRect;
+    if (content.w < 240.0f || content.h < 120.0f) {
+        return; // viewport too small to overlay a toolbar
+    }
+
+    float widths[kToolButtonCount];
+    float barWidth = kToolbarInsetX * 2.0f;
+    for (int i = 0; i < kToolButtonCount; ++i) {
+        widths[i] = TextWidth(kToolButtons[i].label) + 16.0f;
+        barWidth += widths[i] + (i > 0 ? kToolButtonGap : 0.0f);
+    }
+
+    Rect bar = {content.x + kToolbarMargin, content.y + kToolbarMargin, barWidth,
+                kToolButtonHeight + kToolbarInsetY * 2.0f};
+    PushRect(ui, bar, theme::ToolbarBg);
+
+    float penX = bar.x + kToolbarInsetX;
+    float btnY = bar.y + kToolbarInsetY;
+    for (int i = 0; i < kToolButtonCount; ++i) {
+        const ToolButtonDef &def = kToolButtons[i];
+        Rect r = {penX, btnY, widths[i], kToolButtonHeight};
+        penX += widths[i] + kToolButtonGap;
+        bool on = ToolButtonOn(def, &ui->editor);
+        if (ToolButtonWidget(ui, 700000 + i, r, def.label, on)) {
+            if (def.kind == ToolBtn_Mode) {
+                if (ui->editor.toolMode != nullptr) {
+                    *ui->editor.toolMode = def.modeValue;
+                }
+            } else if (def.run != nullptr) {
+                def.run(&ui->editor);
+            }
+        }
+    }
+
+    ui->toolbarRect = bar;
+}
+
 } // namespace
 
 UiState *UiInit(Arena *arena, float drawableWidth, float drawableHeight) {
@@ -709,6 +846,8 @@ void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiD
     if (ui->draggedPanel != 0) {
         PushBorder(ui, ui->dragOutline, 2.0f, kDragOutlineCol);
     }
+
+    BuildToolbar(ui);
 
     MenuDraw(ui);
 
@@ -796,11 +935,18 @@ CommandId UiTakeCommand(UiState *ui) {
     return command;
 }
 
+void UiSetEditorState(UiState *ui, UiEditorState editor) {
+    ui->editor = editor;
+}
+
 bool UiWantsMouse(const UiState *ui) {
     if (ui->menuHasPointer || ui->openMenu >= 0) {
         return true;
     }
     if (ui->draggedPanel != 0 || ui->resizePanel != 0 || ui->activeId != 0) {
+        return true;
+    }
+    if (ui->toolbarRect.w > 0.0f && PointInRect(ui->mouseX, ui->mouseY, ui->toolbarRect)) {
         return true;
     }
     for (int i = 0; i < kMaxPanels; ++i) {

@@ -70,7 +70,8 @@ bool        ScenePickRay(const SceneState*, Ray, PickResult *out);          // R
 // iteration helpers for renderer + audio: SceneEntities(), SceneAudioSources(), SceneActiveListener()
 
 // audio.h  (Andy)
-AudioState *AudioInit(Arena *arena, int deviceSampleRate);
+AudioState *AudioInit(Arena *arena, size_t pcmPoolBytes);   // miniaudio owns the device; rate queried
+int         AudioDeviceSampleRate(const AudioState*);
 ClipId      AudioLoadClip(AudioState*, const char *wavPath);                // Dan's drop calls this
 void        AudioUpdate(AudioState*, const SceneState*, const TimelineState*, double transportTime);
 // AudioSourceParams { ClipId; gain; minDist; maxDist; rolloff; loop; spatial; mute; solo; }
@@ -78,13 +79,88 @@ void        AudioUpdate(AudioState*, const SceneState*, const TimelineState*, do
 // timeline.h  (Dan)
 TimelineState *TimelineInit(Arena *arena);
 bool           TimelineIsPlaying(const TimelineState*);   double TimelineTime(const TimelineState*);
-void           TimelineUpdate(TimelineState*, FrameInput, SceneState*);     // scrub, transport, edits→commands
+void           TimelineUpdate(TimelineState*, FrameInput, SceneState*, double deltaTime); // scrub, transport, edits→commands
 
 // ui: Dan adds the timeline panel + toolbar to the existing UiBuildFrame pass.
 ```
 
 `FrameUpdate` gate (manager): advance sim/animation time only while
 `TimelineIsPlaying`; always run camera + UI so the view redraws when paused.
+
+## Resolved cross-agent decisions (manager, round 1)
+
+- **`Command` is a generic variant** (Eric): `{ tag, void *payload (arena), void (*redo)(SceneState*, void*), void (*undo)(SceneState*, void*) }` alongside any typed helpers. Dan's `TimelineApply*` and Remus's gizmo edits are wrapped as redo/undo bodies — Eric does not extend an enum per request.
+- **Audio PCM pool = 64 MiB**, reserved once in `AudioInit`; the `main` arena grows by +64 MiB (manager sizes it). Clips bump-allocate from the pool, no per-clip free, session-only. Overflow = drop + log.
+- **All audio is spatial + mono in v1.** Stereo files downmixed to mono on load (all clips, not just spatial). Stereo music beds are out of scope (consistent with rejecting the hybrid-timeline option).
+- **HRTF = parametric** (ITD + frequency-dependent ILD + pinna-notch biquads), no vendored HRIR dataset, no voice cap. Measured-HRIR upgrade path kept behind the internal voice-param struct.
+- **Overlapping clips per source are allowed.** `TimelineActiveClips` returns N rows per source; Andy mixes N voices per source. `localOffset` is in seconds.
+- **Clips play once in v1.** `AudioSourceParams.loop` is reserved but not wired to timeline playback. Track mute/solo is mirrored into `AudioSourceParams` by Dan each frame; Andy applies it.
+- **`frame_input.h` drop fields** (Dan lands, platform fills, valid one frame):
+  `const char *const *droppedFiles; int droppedFileCount; float dropX, dropY;`
+- **theme.h**: Dan owns the header and every name. The 3 existing renderer colors (viewport bg, g-buffer clear, mesh base) are routed through it **by the manager** in `renderer_metal.mm` (shader-source `#define` prelude built from `theme::ToFloat`). Remus reads `theme.h` names directly in his gizmo/icon code. Dan does not edit `renderer_metal.mm`.
+- **miniaudio pinned at 0.11.22** (verify it's the latest stable single-file tag at vendor time), `MINIAUDIO_IMPLEMENTATION` only in `audio.cpp`. Manager adds `src/audio.cpp` + `src/timeline.cpp` + `src/scene.cpp` + `src/gizmo.cpp` to the Makefile.
+- **math3d.h**: declare `Mat4` (and `Mat4Identity`) before any `Quat`→`Mat4` helper — current WIP has an ordering error (`Mat4` unknown at line 70).
+
+## Resolved cross-agent decisions (manager, round 2)
+
+- **Gizmo drags use the purpose-built `SceneMakeTransformSelection`** (multi-select + pivot + single undo range), not the generic Command variant. The generic variant is for Dan's timeline ops only.
+- **Eric adds a transform-drag lifecycle** so gizmo drags get live preview + one undo entry:
+  `SceneBeginTransformDrag(SceneState*)` snapshots the selected transforms;
+  `ScenePreviewTransformDrag(SceneState*, TransformDelta)` re-applies from the snapshot every frame, no undo push;
+  `SceneEndTransformDrag(SceneState*, TransformDelta)` pushes exactly one command.
+- **Eric gives non-mesh entities (audio source, listener) a synthetic pick AABB** (~0.3 world units or screen-constant) so `ScenePickRayExcluding` is the single pick path for clicks and icon selection.
+- **`RendererRender` 2nd param becomes `const RendererSceneView*`** (replaces `const GameState*`): `{ const SceneState *scene; ToolMode toolMode; bool gizmoVisible; Vec3 gizmoPivot; GizmoHandle hoveredHandle, activeHandle; }`. No `AudioState*` field — selected-source min/max distance comes from the `AudioSourceParams` embedded in the scene's `AudioSource` component. `renderer.h` may include `scene.h` + `gizmo.h` (all pure C++). Manager builds the view each frame in `FrameRender`.
+- **New renderer accessors** (camera lives in `RendererState`): `Ray RendererScreenPointToRay(const RendererState*, float x, float y)` and `float RendererGizmoScale(const RendererState*, Vec3 pivot)` — the manager calls these in `FrameUpdate` to feed `ScenePickRay` / `GizmoHitTest`.
+- **`GameState` retirement is one atomic cutover**: Eric removes `GameState`, Remus switches the geometry pass to iterate `SceneMeshRenderers()` (mapping `MeshId_Cube`/`MeshId_Plane` onto the existing cube/plane buffers), manager re-wires `app.cpp` — landed together, coordinated through the manager, so the build is red for minutes not hours.
+- **theme.h** gains `AudioDistanceSphere` for the selected-source min/max wireframe spheres. Remus's other names map to reserved entries (`GizmoAxisX/Y/Z`, `GizmoActive`, `AudioSourceIcon`, `ListenerIcon`, `ListenerActive`, `SelectionOutline`).
+
+## Landed so far
+
+- **`theme.h`** — final, all names grouped, `ui.cpp` routed through it (1:1 alias block, no draw site churned), `make` clean. The 3 renderer colours (`ViewportBackground`, `GBufferClear`, `MeshBase`) are still hard-coded in `renderer_metal.mm`; the manager routes them via a shader `#define` prelude **as part of the GameState→SceneState cutover landing**, not before (keeps concurrent `renderer_metal.mm` edits to one).
+- **Toolbar shell** — `ui.h`: `UiTool_*` enum (matches `ToolMode_*`), `struct UiEditorState { int *toolMode; bool *snapEnabled; void(*addSource/addListener/frameSelected)(void*); void *context; }`, `UiSetEditorState(UiState*, UiEditorState)`. `ui.cpp`: data-driven `kToolButtonDef[]`, `BuildToolbar()` draws the strip, null callbacks render inert. `UiBuildFrame` signature unchanged.
+- **Manager app.cpp wiring owed**: call `UiSetEditorState(ui, { SceneToolModePtr(scene), &appState->snapEnabled, <Remus add fns>, ctx })` once per frame before `UiBuildFrame`. Grow the arena +64 MiB for Andy's PCM pool. Add `src/audio.cpp`, `src/timeline.cpp`, `src/gizmo.cpp` to the Makefile (Eric already added `src/scene.cpp`).
+- **Timeline→audio query** (Dan, final): `struct TimelineVoice { EntityId source; ClipId wav; double localOffset; float gain; TimelineClipId clip; }`; `int TimelineActiveVoices(const TimelineState*, double time, TimelineVoice*, int max)` + `…ForSource(…, EntityId, …)`. `localOffset = clip.trimIn + (time - clip.startTime)`, `gain` = clip gain only, past-end rows omitted.
+- **`scene.h` + `math3d.h` FINAL, `make` green** (Eric). `math3d.h` adds `Quat` + full Vec3/Quat helper set, `Mat4` declared first. `scene.h`: `EntityId` = packed generation+slot int32, `Transform { Vec3 pos; Quat rot; Vec3 scale }`, generic `Command { int tag; void *payload; redo; undo }` (external tags ≥ `SceneCmdTag_UserBase = 1000`), shared `Selection` (entity + clip items, `activeEntity`), `SceneBoxSelect(viewProj, NdcRect, additive)`, `ScenePickRayExcluding`, `kNonMeshPickHalfExtent = 0.3f`, `SceneMeshRenderers/SceneAudioSources/SceneActiveListener` views, `SceneToolModePtr` for Dan's toolbar, drag lifecycle `SceneBeginTransformDrag/ScenePreviewTransformDrag/SceneEndTransformDrag`. `SceneInit` leaves the scene empty; `game.cpp` will expose `GameLoadDefaultScene(SceneState*)` (direct inserts, undo stack starts empty) at the cutover.
+
+## Progress (manager tracking)
+
+### Cutover LANDED (manager, solo — agents were rate-limited)
+
+`GameState` is retired. The app runs on `SceneState` + `AudioState` + `TimelineState`. `make` clean, runs with no Metal validation errors.
+
+- **Makefile**: `src/audio.cpp src/timeline.cpp src/gizmo.cpp` added to `SRC_CPP`; `-framework CoreAudio -framework AudioToolbox -framework AudioUnit` added.
+- **`game.h`/`game.cpp`**: reduced to `GameLoadDefaultScene(SceneState*)` only. `GameState`, `GameInit`, `GameUpdate`, `GameToggleSpin`, `GameImportBlendFile`, `SceneObject`, `Primitive`, `kMaxSceneObjects` all deleted.
+- **`scene_import.*`**: `SceneImportBlendFile(SceneState*, const char*)` — `SceneClear` then `SceneAddEntity` + `SceneSetMesh` per object, cube/plane-only, Blender-cube ×2 fixup kept, rotation via `QuatNormalize(QuatFromMat4(ConvertRotation(...)))`. Non-undoable replacement.
+- **`renderer.h`/`renderer_metal.mm`**: `RendererRender` + `EncodeGeometryPass` take `const SceneState*`; geometry loop iterates `SceneMeshRenderers()` into a `static SceneMeshView[kMaxMeshRenderers]`, maps `MeshId_Cube`/`MeshId_Plane` onto the existing buffers. Added `Vec3 RendererCameraFocus(const RendererState*)` (orbit target — the drop point for `ToolAdd*`).
+- **`frame_input.h`/`platform_macos.mm`**: `toggleSpin` field + `pendingToggleSpin` plumbing + the `p`-key handler removed. Arena grew 64 → **192 MiB** (Andy's 64 MiB PCM pool + scene/timeline pools + headroom).
+- **`app.cpp`**: `AppState { SceneState*, AudioState*, TimelineState*, RendererState*, UiState*, UiRenderState*, ..., bool snapEnabled }`. Init order `AudioInit(arena, kAudioPcmPoolBytes)` → `SceneInit` → `TimelineInit` → `GameLoadDefaultScene`. Frame order `TimelineUpdate` → `simDt = TimelineIsPlaying ? dt : 0` → `SceneUpdate(scene, simDt)` → `AudioUpdate(audio, scene, timeline, TimelineTime())`. `PublishEditorState` calls `UiSetEditorState` every frame before `UiBuildFrame` with `SceneToolModePtr(scene)`, `&snapEnabled`, `AppAddSource`/`AppAddListener` (→ `ToolAddAudioSource`/`ToolAddListener` with a null ray + `RendererCameraFocus` fallback), `frameSelected = nullptr`, and `timeline`/`scene`/`audio`. **Spacebar** → `TimelineTogglePlay` (replaces the `p` key). `ImportBlendFile` → `SceneImportBlendFile`.
+- **`scene.h`/`scene.cpp`/`timeline.cpp`**: the undo-command struct renamed `Command` → **`SceneCommand`** (collided with `menu.h`'s `Command` once both landed in `app.cpp`'s TU). `SceneSubmitCommand` name unchanged.
+
+### Still pending (was in-flight when agents hit the session limit)
+
+| Owner | Item | Notes |
+|-------|------|-------|
+| Dan | **Timeline panel rendering** | bottom dockable panel: ruler + lanes + clip rects + playhead + transport buttons. `UiEditorState` already carries `timeline`/`scene`/`audio`. Nothing drawn yet. |
+| Dan | **wav drag-drop** | `frame_input.h` needs `const char *const *droppedFiles; int droppedFileCount; float dropX, dropY;` + a `platform_macos.mm` drop shim. Deferred with the panel (panel is the drop target). |
+| Remus | **Gizmo viewport interaction** | `GizmoHitTest` → `SceneBeginTransformDrag` + `GizmoBeginDrag` → per-frame `ScenePreviewTransformDrag(GizmoUpdateDrag())` → `SceneEndTransformDrag(GizmoEndDrag())`. Needs a screen→ray helper (`RendererScreenPointToRay`, never written — no `Mat4Inverse` in `math3d.h` yet). Click-select + box-select share it. |
+| Remus | **Gizmo + icon Metal draw** | overlay/unlit pipeline + per-frame vertex buffer; `GizmoBuild` / `GizmoBuildIcons` fill `GizmoVertex`. Audio sources / listeners currently invisible (no `MeshRenderer`). |
+| manager | **Renderer colours via `theme.h`** | `ViewportBackground`, `GBufferClear`, `MeshBase` still hard-coded in `renderer_metal.mm`; route via a shader `#define` prelude. |
+| manager | collapse `ToolAdd*` to one undo step | needs a `scene.h` create-with-transform helper. |
+
+**What works now**: default scene renders (ground + 2 occluder cubes); orbit camera; toolbar switches tool mode; Add Source / Add Listener drop entities at the camera focus (undo x2); spacebar drives the transport clock; `AudioUpdate` runs every frame (silent until a timeline clip exists).
+
+## Resolved cross-agent decisions (manager, round 3)
+
+- Transform op name stays **`SceneMakeTransformSelection`** (plan wins over the earlier `SceneTransformSelection` note).
+- **Default scene is not undoable** — built via direct pool inserts, undo stack empty at startup. Confirmed.
+- **`p` key / `GameToggleSpin`**: Eric drops `GameToggleSpin` from `game.h` at the cutover; manager removes `input.toggleSpin` handling from `app.cpp`; the `frame_input.h` field + platform plumbing are cleaned in the same cutover landing (Dan is already in both files for drop events).
+- **Generic-command payload lifetime**: submitter arena-allocates; a ring-evicted command's payload leaks for the session. Payloads are tens of bytes and human-paced — acceptable for v1, no pooling required.
+- **Blend import — KEEP, reroute onto `SceneState`, cube/plane-only** (resolved). The existing `scene_import.cpp` already classifies every Blender mesh object as `Plane` (4 verts) or `Cube` (else) and maps it onto the built-in unit meshes — it never supported arbitrary geometry, so there is no dynamic-mesh work. Eric owns the reroute (lands in the cutover):
+  - `scene_import.h`: `bool SceneImportBlendFile(SceneState*, const char *filepath)`.
+  - `scene_import.cpp`: keep the `.blend` parsing + vert-count classification + Z-up→Y-up conversion; replace the `state->objects[i]` writes with `SceneCreateEntity(EntityKind_Mesh, name)` + set `Transform` + set the `MeshRenderer.mesh` to `MeshId_Cube`/`MeshId_Plane`. Keep the Blender-default-cube ×2 scale fixup.
+  - Import = **non-undoable scene replacement** (clear entities + clear undo stack, then load), same model as `GameLoadDefaultScene`.
+  - `math3d.h`: add `QuatFromMat4` (the importer builds rotation as a `Mat4`; `Transform.rotation` is a `Quat`).
+  - `app.cpp` `ImportBlendFile` routes here; the File > Import menu command stays enabled.
 
 ## Dependency order
 

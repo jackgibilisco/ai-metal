@@ -1,6 +1,7 @@
 #include "scene_import.h"
 
 #include "blend_file.h"
+#include "scene.h"
 
 #include <cstdio>
 
@@ -44,16 +45,18 @@ Mat4 QuaternionToMat4(float w, float x, float y, float z) {
 
 } // namespace
 
-bool SceneImportBlendFile(GameState *state, const char *filepath) {
+bool SceneImportBlendFile(SceneState *scene, const char *filepath) {
     BlendFile *file = BlendFileOpen(filepath);
     if (!file) {
         fprintf(stderr, "Failed to open blend file: %s\n", filepath);
         return false;
     }
 
+    SceneClear(scene);
+
     int importedCount = 0;
     BlendBlock objectBlock;
-    while (importedCount < kMaxSceneObjects) {
+    while (importedCount < kMaxMeshRenderers) {
         objectBlock = BlendFileNextBlock(file, "OB", objectBlock);
         if (!objectBlock) {
             break;
@@ -76,7 +79,7 @@ bool SceneImportBlendFile(GameState *state, const char *filepath) {
         if (!BlendFileReadInt(file, meshBlock, "verts_num", &vertsNum)) {
             BlendFileReadInt(file, meshBlock, "totvert", &vertsNum);
         }
-        Primitive primitive = (vertsNum == 4) ? Primitive::Plane : Primitive::Cube;
+        MeshId mesh = (vertsNum == 4) ? MeshId_Plane : MeshId_Cube;
 
         float loc[3] = {0.0f, 0.0f, 0.0f};
         float scale[3] = {1.0f, 1.0f, 1.0f};
@@ -101,20 +104,24 @@ bool SceneImportBlendFile(GameState *state, const char *filepath) {
             rotationBlenderSpace = Mat4EulerXYZ(Vec3{rot[0], rot[1], rot[2]});
         }
 
-        SceneObject &object = state->objects[importedCount];
-        object.position = ConvertPosition(Vec3{loc[0], loc[1], loc[2]});
-        object.scale = ConvertScale(Vec3{scale[0], scale[1], scale[2]});
-        if (primitive == Primitive::Cube) {
+        Transform transform = TransformIdentity();
+        transform.position = ConvertPosition(Vec3{loc[0], loc[1], loc[2]});
+        transform.scale = ConvertScale(Vec3{scale[0], scale[1], scale[2]});
+        if (mesh == MeshId_Cube) {
             // The engine's built-in cube mesh is a 1x1x1 unit cube; Blender's
             // default cube is 2x2x2.
-            object.scale.x *= 2.0f;
-            object.scale.y *= 2.0f;
-            object.scale.z *= 2.0f;
+            transform.scale.x *= 2.0f;
+            transform.scale.y *= 2.0f;
+            transform.scale.z *= 2.0f;
         }
-        object.rotation = ConvertRotation(rotationBlenderSpace);
-        object.rotationEuler = Vec3{0.0f, 0.0f, 0.0f};
-        object.rotationSpeed = Vec3{0.0f, 0.0f, 0.0f};
-        object.primitive = primitive;
+        transform.rotation = QuatNormalize(QuatFromMat4(ConvertRotation(rotationBlenderSpace)));
+
+        char name[32];
+        snprintf(name, sizeof(name), "Imported %d", importedCount);
+        EntityId entity = SceneAddEntity(scene, EntityKind_Mesh, name, transform);
+        Vec3 aabbMin = (mesh == MeshId_Plane) ? Vec3{-0.5f, 0.0f, -0.5f} : Vec3{-0.5f, -0.5f, -0.5f};
+        Vec3 aabbMax = (mesh == MeshId_Plane) ? Vec3{0.5f, 0.0f, 0.5f} : Vec3{0.5f, 0.5f, 0.5f};
+        SceneSetMesh(scene, entity, mesh, aabbMin, aabbMax);
         ++importedCount;
     }
 
@@ -125,6 +132,5 @@ bool SceneImportBlendFile(GameState *state, const char *filepath) {
         return false;
     }
 
-    state->objectCount = importedCount;
     return true;
 }

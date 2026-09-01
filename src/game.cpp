@@ -1,56 +1,37 @@
 #include "game.h"
 
-#include "scene_import.h"
+#include "scene.h"
 
-namespace {
+void GameLoadDefaultScene(SceneState *scene) {
+    Transform transform = TransformIdentity();
 
-constexpr int kDemoCubeCount = 3;
+    transform.position = Vec3{0.0f, 0.0f, 0.0f};
+    transform.scale = Vec3{20.0f, 1.0f, 20.0f};
+    EntityId ground = SceneAddEntity(scene, EntityKind_Mesh, "Ground", transform);
+    SceneSetMesh(scene, ground, MeshId_Plane, Vec3{-0.5f, 0.0f, -0.5f}, Vec3{0.5f, 0.0f, 0.5f});
 
-} // namespace
+    transform = TransformIdentity();
+    transform.position = Vec3{-3.0f, 1.0f, -2.0f};
+    transform.scale = Vec3{2.0f, 2.0f, 2.0f};
+    EntityId occluderA = SceneAddEntity(scene, EntityKind_Mesh, "Occluder A", transform);
+    SceneSetMesh(scene, occluderA, MeshId_Cube, Vec3{-0.5f, -0.5f, -0.5f}, Vec3{0.5f, 0.5f, 0.5f});
 
-GameState *GameInit(Arena *arena) {
-    GameState *state = ArenaPushStruct(arena, GameState);
+    transform = TransformIdentity();
+    transform.position = Vec3{4.0f, 1.5f, 1.0f};
+    transform.scale = Vec3{1.5f, 3.0f, 1.5f};
+    EntityId occluderB = SceneAddEntity(scene, EntityKind_Mesh, "Occluder B", transform);
+    SceneSetMesh(scene, occluderB, MeshId_Cube, Vec3{-0.5f, -0.5f, -0.5f}, Vec3{0.5f, 0.5f, 0.5f});
 
-    state->objectCount = kDemoCubeCount;
-    for (int i = 0; i < kDemoCubeCount; ++i) {
-        SceneObject &object = state->objects[i];
-        object.position = Vec3{(i - 1) * 3.0f, 0.0f, 0.0f};
-        object.scale = Vec3{1.0f, 1.0f, 1.0f};
-        object.rotation = Mat4Identity();
-        object.rotationEuler = Vec3{0.0f, 0.0f, 0.0f};
-        object.rotationSpeed = Vec3{0.6f + 0.2f * i, 0.9f - 0.15f * i, 0.0f};
-        object.primitive = Primitive::Cube;
-    }
+    transform = TransformIdentity();
+    transform.position = Vec3{-6.0f, 1.0f, 4.0f};
+    SceneAddEntity(scene, EntityKind_AudioSource, "Source Left", transform);
 
-    return state;
-}
+    transform = TransformIdentity();
+    transform.position = Vec3{7.0f, 1.0f, -5.0f};
+    SceneAddEntity(scene, EntityKind_AudioSource, "Source Right", transform);
 
-bool GameUpdate(GameState *state, float deltaTime) {
-    if (state->spinPaused || deltaTime <= 0.0f) {
-        return false;
-    }
-
-    bool advanced = false;
-    for (int i = 0; i < state->objectCount; ++i) {
-        SceneObject &object = state->objects[i];
-        bool spins = object.rotationSpeed.x != 0.0f || object.rotationSpeed.y != 0.0f ||
-                     object.rotationSpeed.z != 0.0f;
-        if (!spins) {
-            continue;
-        }
-        object.rotationEuler.x += object.rotationSpeed.x * deltaTime;
-        object.rotationEuler.y += object.rotationSpeed.y * deltaTime;
-        object.rotationEuler.z += object.rotationSpeed.z * deltaTime;
-        object.rotation = Mat4EulerXYZ(object.rotationEuler);
-        advanced = true;
-    }
-    return advanced;
-}
-
-void GameToggleSpin(GameState *state) {
-    state->spinPaused = !state->spinPaused;
-}
-
-bool GameImportBlendFile(GameState *state, const char *filepath) {
-    return SceneImportBlendFile(state, filepath);
+    transform = TransformIdentity();
+    transform.position = Vec3{0.0f, 1.0f, 0.0f};
+    EntityId listener = SceneAddEntity(scene, EntityKind_AudioListener, "Listener", transform);
+    SceneSetActiveListener(scene, listener);
 }

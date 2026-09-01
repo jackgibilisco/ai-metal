@@ -40,10 +40,12 @@ returns false the platform layer skips `FrameRender` and leaves the last
 presented drawable on screen. The `CAMetalDisplayLink` is paused outright
 when the window can't be seen (see the platform layer).
 
-`Init` pushes a small `AppState { GameState*, RendererState*, UiState*,
-UiRenderState*, UiDemoState, MenuState, PlatformMenuHooks, int
-forcedRenderFrames }` as the very first thing in
-the arena (`src/app.cpp`). `FrameUpdate`/`FrameRender` recover it by
+`Init` pushes a small `AppState { SceneState*, AudioState*, TimelineState*,
+RendererState*, UiState*, UiRenderState*, UiDemoState, MenuState,
+PlatformMenuHooks, bool snapEnabled, int forcedRenderFrames }` as the very
+first thing in the arena (`src/app.cpp`). The per-frame order is
+`TimelineUpdate` → gate the sim delta on `TimelineIsPlaying` → `SceneUpdate`
+→ `AudioUpdate`. `FrameUpdate`/`FrameRender` recover it by
 reinterpreting `arena->base` — there are no global/static pointers holding
 program state. `FrameUpdate` builds the immediate-mode UI, then routes any
 in-app menu click and any matched keyboard shortcut through the same
@@ -56,13 +58,26 @@ The portable input/menu structs live in their own dependency-free headers
 
 ## Layers, each with a different portability contract
 
-- **`src/game.h`/`.cpp`** — pure, platform-agnostic C++. No Metal, no AppKit,
-  no platform headers of any kind. Owns `GameState` (currently 3 `Cube`s:
-  position + rotation, plus a `spinPaused` flag toggled by `GameToggleSpin`
-  / the `p` key). `GameUpdate` advances each cube's rotation by `deltaTime`
-  and returns whether anything actually moved, so the platform can skip
-  rendering an unchanged scene. This is the file to extend for anything that
-  is simulation/gameplay rather than rendering.
+- **`src/scene.h`/`.cpp`** — pure, platform-agnostic C++. The editor's scene
+  representation: fixed-capacity entity + component pools in the arena
+  (meshes, audio sources, listeners), a shared entity/clip selection set,
+  ray/AABB picking, and a unified command/undo stack (`SceneCommand`). The
+  renderer and audio read it through iteration helpers (`SceneMeshRenderers`,
+  `SceneAudioSources`, `SceneActiveListener`); the gizmo and timeline push
+  edits through `SceneSubmitCommand`.
+- **`src/game.h`/`.cpp`** — pure C++, now just `GameLoadDefaultScene(SceneState*)`,
+  which direct-inserts the default spatial-audio test scene (undo stack stays
+  empty).
+- **`src/audio.h`/`.cpp`** — pure C++ + miniaudio (vendored). Decodes wavs
+  into a 64 MiB PCM pool, runs a parametric-HRTF + distance + occlusion mixer
+  on the device thread. `AudioUpdate(audio, scene, timeline, transportTime)`
+  once per frame.
+- **`src/timeline.h`/`.cpp`** — pure C++. The transport clock (the editor's
+  global sim clock) plus tracks/clips bound to scene audio sources; every
+  structural edit submits one `SceneCommand`.
+- **`src/gizmo.h`/`.cpp`** — pure C++ transform-gizmo hit-test + drag math
+  (`GizmoHitTest` → `TransformDelta`), mesh/icon builders, and the
+  `ToolAddAudioSource` / `ToolAddListener` placement helpers.
 - **`src/ui.h`/`.cpp`** — pure C++ immediate-mode UI, no Metal/AppKit. Each
   frame `UiBuildFrame` reads one `FrameInput` plus an app-owned
   `UiDemoState*` (the values the demo sliders edit), builds the panels
