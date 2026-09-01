@@ -136,18 +136,30 @@ void           TimelineUpdate(TimelineState*, FrameInput, SceneState*, double de
 - **`app.cpp`**: `AppState { SceneState*, AudioState*, TimelineState*, RendererState*, UiState*, UiRenderState*, ..., bool snapEnabled }`. Init order `AudioInit(arena, kAudioPcmPoolBytes)` → `SceneInit` → `TimelineInit` → `GameLoadDefaultScene`. Frame order `TimelineUpdate` → `simDt = TimelineIsPlaying ? dt : 0` → `SceneUpdate(scene, simDt)` → `AudioUpdate(audio, scene, timeline, TimelineTime())`. `PublishEditorState` calls `UiSetEditorState` every frame before `UiBuildFrame` with `SceneToolModePtr(scene)`, `&snapEnabled`, `AppAddSource`/`AppAddListener` (→ `ToolAddAudioSource`/`ToolAddListener` with a null ray + `RendererCameraFocus` fallback), `frameSelected = nullptr`, and `timeline`/`scene`/`audio`. **Spacebar** → `TimelineTogglePlay` (replaces the `p` key). `ImportBlendFile` → `SceneImportBlendFile`.
 - **`scene.h`/`scene.cpp`/`timeline.cpp`**: the undo-command struct renamed `Command` → **`SceneCommand`** (collided with `menu.h`'s `Command` once both landed in `app.cpp`'s TU). `SceneSubmitCommand` name unchanged.
 
-### Still pending (was in-flight when agents hit the session limit)
+### Round 2 LANDED (agents Remus + Dan, worktrees merged onto `ui-panel`)
 
-| Owner | Item | Notes |
-|-------|------|-------|
-| Dan | **Timeline panel rendering** | bottom dockable panel: ruler + lanes + clip rects + playhead + transport buttons. `UiEditorState` already carries `timeline`/`scene`/`audio`. Nothing drawn yet. |
-| Dan | **wav drag-drop** | `frame_input.h` needs `const char *const *droppedFiles; int droppedFileCount; float dropX, dropY;` + a `platform_macos.mm` drop shim. Deferred with the panel (panel is the drop target). |
-| Remus | **Gizmo viewport interaction** | `GizmoHitTest` → `SceneBeginTransformDrag` + `GizmoBeginDrag` → per-frame `ScenePreviewTransformDrag(GizmoUpdateDrag())` → `SceneEndTransformDrag(GizmoEndDrag())`. Needs a screen→ray helper (`RendererScreenPointToRay`, never written — no `Mat4Inverse` in `math3d.h` yet). Click-select + box-select share it. |
-| Remus | **Gizmo + icon Metal draw** | overlay/unlit pipeline + per-frame vertex buffer; `GizmoBuild` / `GizmoBuildIcons` fill `GizmoVertex`. Audio sources / listeners currently invisible (no `MeshRenderer`). |
-| manager | **Renderer colours via `theme.h`** | `ViewportBackground`, `GBufferClear`, `MeshBase` still hard-coded in `renderer_metal.mm`; route via a shader `#define` prelude. |
-| manager | collapse `ToolAdd*` to one undo step | needs a `scene.h` create-with-transform helper. |
+Combined `make` clean (`-Wall -Wextra`, no warnings); app runs under `MTL_DEBUG_LAYER=1` with no validation errors; `tests/gizmo_test.cpp` + `tests/math3d_test.cpp` both pass (standalone, not in the Makefile).
 
-**What works now**: default scene renders (ground + 2 occluder cubes); orbit camera; toolbar switches tool mode; Add Source / Add Listener drop entities at the camera focus (undo x2); spacebar drives the transport clock; `AudioUpdate` runs every frame (silent until a timeline clip exists).
+- **Gizmo interaction + draw** (commit `14e5194`): `math3d.h` gains `Mat4Inverse`. `renderer.h` gains `RendererScreenPointToRay`, `RendererViewProjection`, `RendererGizmoScale`, and `struct RendererSceneView { const SceneState*; ToolMode; bool gizmoVisible; Vec3 gizmoPivot; GizmoHandle hoveredHandle, activeHandle; }` — `RendererRender`'s 2nd param is now `const RendererSceneView*`. **`renderer.h` now `#include`s `gizmo.h`** (both pure C++). `renderer_metal.mm` adds an unlit overlay pipeline + per-frame vertex buffer, drawing `GizmoBuild` (T/R/S tool + selection) and `GizmoBuildIcons` (all sources + listeners) on top of the lit image (no depth test — scene depth is `DontCare` + content-sized). The three renderer colours now come from `theme.h` via a `#define` prelude on the shader source. `app.cpp` `UpdateViewportInteraction`: click-select (all tool modes), box-select (Select tool only), gizmo hover highlight, and gizmo drag (`SceneBeginTransformDrag`+`GizmoBeginDrag` → per-frame `ScenePreviewTransformDrag` → `SceneEndTransformDrag`), with mouse press/release edges recovered from the previous frame. `scene.h`/`scene.cpp` gain `SceneAudioListeners`/`SceneAudioListenerView` (read-only, for icon draw) and `SceneCreateEntityAt` (create-with-transform) — **`ToolAddAudioSource`/`ToolAddListener` are now one undo step each.**
+- **Timeline panel + wav drop** (commit `d7cf448`): `frame_input.h` gains `droppedFiles`/`droppedFileCount`/`dropX`/`dropY` (appended; platform sets them by assignment so field order is safe). `platform_macos.mm` registers `NSPasteboardTypeFileURL`, filters `.wav`, latches paths + drop point for one frame. `ui.cpp` draws a bottom `UiDock_Bottom` "Timeline" panel: transport row (play/pause/stop + `mm:ss.cs`), per-second ruler with click-to-seek, grabbable playhead (`TimelineScrub`/`TimelineScrubEnd`), one lane per track (name + M/S indicators), clip rects with trim handles + selection tint. Clip body drag → `TimelineSubmitMoveClip` (cross-lane) on release; edge drag → `TimelineSubmitTrimClip` on release. `.wav` on a lane → `AudioLoadClip` + `TimelineSubmitCreateClip`; `.wav` below the lanes → `TimelineSubmitAddTrack` (bound to the selected source) + clip. Initial dock height 240.
+
+**Behaviour changes to note**
+- **`TimelineSubmitTrimClip`** (`timeline.cpp`) now slides `clipAfter.startTime` by `newTrimIn - oldTrimIn` so a left-edge trim is one undo step with `localOffset` held constant. Right-edge trims (unchanged `trimIn`) are unaffected. Only caller is `ui.cpp`.
+- Gizmo overlay has **no depth test** — handles always draw over geometry (standard editor behaviour).
+- **Click-select fires in every tool mode**, not just Select (box-select stays Select-only).
+
+**Still deferred / cosmetic**
+- Timeline mute/solo are drawn as indicators, not clickable — no `TimelineSubmitSetMute`-style API yet (`TimelineUpdate` mirrors the flags into `AudioSourceParams`).
+- Gizmo screen size `kGizmoPixelSize = 80` drawable px reads slightly small; one constant to bump.
+- `hoveredHandle` not refreshed mid non-gizmo drag (stale until release).
+- Overlay + uniform buffers are CPU-written each frame with no ring/triple-buffering (matches the pre-existing `uniformBuffer` pattern).
+- **wav-drop path is untested** — can't drive a real Finder drag headlessly. Needs a manual check.
+
+### Tooling issue observed
+
+Both round-2 worktrees were provisioned off `main` (README history), not `ui-panel` — none of the scene-editor files were present. Both agents reset their branch to `ui-panel` (`72b2e1e`) before starting; their branches had no commits of their own and their trees were clean, so nothing was lost and both merged cleanly. Flagging the worktree base-commit selection for a look.
+
+**What works now**: default scene renders (ground + 2 cubes) with source/listener icons; orbit camera; toolbar switches tool mode; click to select, drag-box to multi-select, gizmo to translate/rotate/scale (one undo step per drag); Add Source / Add Listener (one undo step); spacebar drives the transport; bottom Timeline panel with working transport + ruler + playhead + lanes/clips; `AudioUpdate` every frame (audible once a clip is dropped and the transport plays).
 
 ## Resolved cross-agent decisions (manager, round 3)
 
