@@ -32,6 +32,7 @@ constexpr Color TitleBarHot = {54, 59, 69, 255};
 constexpr Color ResizeGrip = {58, 62, 70, 255};
 constexpr Color ResizeGripHot = {92, 142, 222, 255};
 constexpr Color DragOutline = {96, 150, 232, 255};
+constexpr Color MarqueeFill = {96, 150, 232, 46}; // box-select drag rectangle
 constexpr Color Button = {52, 57, 66, 255};
 constexpr Color ButtonHot = {70, 77, 90, 255};
 constexpr Color ButtonActive = {92, 142, 222, 255};
@@ -54,7 +55,8 @@ constexpr Color MenuSeparator = {70, 77, 90, 255};
 // shader-source #define prelude built from ToFloat) -----------------------
 constexpr Color ViewportBackground = {13, 13, 20, 255}; // void behind geometry
 constexpr Color GBufferClear = {0, 0, 0, 255};          // geometry-pass clear
-constexpr Color MeshBase = {64, 140, 242, 255};         // default lit mesh color
+constexpr Color MeshBase = {226, 228, 233, 255};        // unselected mesh (white)
+constexpr Color MeshSelected = {74, 140, 242, 255};     // selected mesh (blue)
 
 // ---- gizmos and scene icons (src/renderer_metal.mm - Remus reads these
 // names directly in the gizmo / icon pass) --------------------------------
@@ -76,6 +78,7 @@ constexpr Color TimelineLaneOdd = {30, 33, 38, 255};
 constexpr Color TimelineLaneHeader = {40, 44, 51, 255};
 constexpr Color TimelineClip = {74, 120, 180, 255};
 constexpr Color TimelineClipSelected = {120, 170, 236, 255};
+constexpr Color TimelineClipGhost = {120, 170, 236, 90}; // drag-hover drop preview
 constexpr Color TimelineClipTrimHandle = {206, 224, 248, 255};
 constexpr Color Playhead = {236, 196, 92, 255};
 

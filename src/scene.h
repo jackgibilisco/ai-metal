@@ -175,7 +175,21 @@ EntityId SceneCreateEntity(SceneState *scene, EntityKind kind, const char *name)
 // would push two commands, so tool placement goes through this.
 EntityId SceneCreateEntityAt(SceneState *scene, EntityKind kind, const char *name,
                              Transform transform);
+
+// Create a mesh entity with a chosen built-in mesh (and matching local AABB)
+// as ONE undo step. For the outliner's "add plane" — SceneCreateEntityAt
+// always makes a cube.
+EntityId SceneCreateMeshEntityAt(SceneState *scene, const char *name, MeshId mesh,
+                                 Transform transform);
+
+// Rename as ONE undoable command.
+void SceneRenameEntity(SceneState *scene, EntityId id, const char *name);
 void SceneDeleteEntity(SceneState *scene, EntityId id);
+
+// Delete every selected entity as ONE undoable command, then clear the
+// selection. Clip items in the selection are ignored.
+void SceneDeleteSelection(SceneState *scene);
+
 void SceneSetEntityTransform(SceneState *scene, EntityId id, Transform next);
 
 // Multi-select transform. Applies `delta` about a pivot to every selected
@@ -272,6 +286,15 @@ struct SceneMeshView {
     Vec3 localAabbMax;
 };
 int SceneMeshRenderers(const SceneState *scene, SceneMeshView *out, int maxOut);
+
+// Every live entity, in a stable order, for the scene-outliner panel. `name`
+// points into scene storage — valid for the current frame only.
+struct SceneEntityRow {
+    EntityId id;
+    const char *name;
+    EntityKind kind;
+};
+int SceneEntities(const SceneState *scene, SceneEntityRow *out, int maxOut);
 
 struct SceneAudioSourceView {
     EntityId entity;

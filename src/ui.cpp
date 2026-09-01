@@ -16,14 +16,11 @@ constexpr float kPadding = 14.0f;
 constexpr float kRowGap = 9.0f;
 constexpr float kButtonHeight = 30.0f;
 constexpr float kSliderHeight = 46.0f;
+// Fallback cell size when the proportional font metrics have not been handed
+// in yet (see UiSetFontMetrics).
 constexpr float kTextScale = 2.0f;
-constexpr float kGlyphPixels = 8.0f; // font cell is 8x8; advance and line height
-constexpr float kGlyphHeight = kGlyphPixels;
-
-// Must match the atlas built in ui_render_metal.mm: glyph `c` occupies cell
-// (c - kFontFirstChar) of a kFontCharCount-wide row.
-constexpr int kFontFirstChar = 32;
-constexpr int kFontCharCount = 96;
+constexpr float kGlyphPixels = 8.0f;
+constexpr float kFallbackLineHeight = kGlyphPixels * kTextScale;
 
 constexpr float kMenuBarHeight = 32.0f;
 constexpr float kMenuTitlePadX = 12.0f;
@@ -38,10 +35,11 @@ constexpr float kTitleBarHeight = 24.0f;
 constexpr float kPanelBorderPx = 1.0f;
 constexpr float kResizeGripPx = 6.0f;
 constexpr float kDockSnapMargin = 56.0f;   // cursor within this of an edge -> dock preview
-constexpr float kPanelMinDockSize = 150.0f;
+constexpr float kPanelMinDockW = 200.0f;   // Left/Right docks (dockSize is a width)
+constexpr float kPanelMinDockH = 150.0f;   // Top/Bottom docks (dockSize is a height)
 constexpr float kDockMaxFraction = 0.6f;
-constexpr float kFloatMinW = 170.0f;
-constexpr float kFloatMinH = 90.0f;
+constexpr float kFloatMinW = 200.0f;
+constexpr float kFloatMinH = 150.0f;
 
 constexpr int kMaxVertices = 65536;
 
@@ -145,6 +143,35 @@ struct UiState {
     bool mousePressed;
     bool mouseReleased;
 
+    // Scene-outliner inline rename + add-kind dropdown.
+    int focusedInputId; // 0 = no text field has the keyboard
+    char editBuffer[64];
+    int editLen;
+    int editCaret;
+    bool addMenuOpen;
+    unsigned int frameIndex;    // ++ per UiBuildFrame; drives caret blink + double-click timing
+    int lastClickControlId;
+    unsigned int lastClickFrame;
+
+    bool marqueeActive;
+    Rect marqueeRect;
+
+    // Timeline view: horizontal pan (seconds at the ruler's left edge), zoom
+    // (px per second), vertical lane pan (pixels).
+    double timelineScrollSeconds;
+    float timelinePixelsPerSecond;
+    float timelineLaneScroll;
+
+    // Global UI zoom. The whole immediate-mode layout runs in logical units;
+    // logical = realPixels / uiScale. Vertices scale up on push, incoming
+    // pointer coords scale down, size accessors report real pixels.
+    float uiScale;
+    float realDrawableWidth;
+    float realDrawableHeight;
+
+    const KeyEvent *frameKeys; // this frame's key events; valid only during UiBuildFrame
+    int frameKeyCount;
+
     UiVertex vertices[kMaxVertices];
     int vertexCount;
 };
@@ -154,8 +181,8 @@ namespace {
 void PushVertexUV(UiState *ui, float x, float y, float u, float v, float mode, Color c) {
     assert(ui->vertexCount < kMaxVertices);
     UiVertex &vert = ui->vertices[ui->vertexCount++];
-    vert.x = x;
-    vert.y = y;
+    vert.x = x * ui->uiScale;
+    vert.y = y * ui->uiScale;
     vert.u = u;
     vert.v = v;
     vert.mode = mode;
@@ -167,6 +194,26 @@ void PushVertexUV(UiState *ui, float x, float y, float u, float v, float mode, C
 
 void PushVertex(UiState *ui, float x, float y, Color c) {
     PushVertexUV(ui, x, y, 0.0f, 0.0f, 0.0f, c);
+}
+
+// Proportional font metrics, baked and owned by the UI renderer, handed in once
+// via UiSetFontMetrics. Immutable for the process, so a file-scope pointer
+// rather than threading it through every text call.
+const UiFontMetrics *g_font = nullptr;
+
+// Nominal text-line box height. Callers reserve this and centre text in it;
+// PushText places the baseline so the CAP height (not the font's loose
+// ascent/descent) sits centred in the same box.
+float TextLineHeight() { return g_font != nullptr ? g_font->pixelSize : kFallbackLineHeight; }
+
+// Cap height from a reference uppercase glyph, for visual vertical centring.
+float TextCapHeight() { return g_font != nullptr ? g_font->glyphs['H' - 32].height : kGlyphPixels; }
+
+const UiGlyphMetric *GlyphFor(int codepoint) {
+    if (codepoint < 32 || codepoint >= 128) {
+        return &g_font->glyphs[0]; // treat unknowns as a space
+    }
+    return &g_font->glyphs[codepoint - 32];
 }
 
 void PushQuad(UiState *ui, float x0, float y0, float x1, float y1, float x2, float y2, float x3,
@@ -190,33 +237,55 @@ void PushBorder(UiState *ui, Rect r, float t, Color c) {
     PushRect(ui, {r.x + r.w - t, r.y, t, r.h}, c);
 }
 
-void PushGlyph(UiState *ui, float x, float y, float u0, float u1, Color c) {
-    float x1 = x + kGlyphPixels * kTextScale;
-    float y1 = y + kGlyphPixels * kTextScale;
-    PushVertexUV(ui, x, y, u0, 0.0f, 1.0f, c);
-    PushVertexUV(ui, x1, y, u1, 0.0f, 1.0f, c);
-    PushVertexUV(ui, x1, y1, u1, 1.0f, 1.0f, c);
-    PushVertexUV(ui, x, y, u0, 0.0f, 1.0f, c);
-    PushVertexUV(ui, x1, y1, u1, 1.0f, 1.0f, c);
-    PushVertexUV(ui, x, y1, u0, 1.0f, 1.0f, c);
+void PushGlyphQuad(UiState *ui, float x0, float y0, float x1, float y1, float u0, float v0, float u1,
+                   float v1, Color c) {
+    PushVertexUV(ui, x0, y0, u0, v0, 1.0f, c);
+    PushVertexUV(ui, x1, y0, u1, v0, 1.0f, c);
+    PushVertexUV(ui, x1, y1, u1, v1, 1.0f, c);
+    PushVertexUV(ui, x0, y0, u0, v0, 1.0f, c);
+    PushVertexUV(ui, x1, y1, u1, v1, 1.0f, c);
+    PushVertexUV(ui, x0, y1, u0, v1, 1.0f, c);
 }
 
+// `y` is the top of a TextLineHeight()-tall line; glyphs sit on the baseline
+// TextLineHeight()*ascent-ratio down from it.
 void PushText(UiState *ui, float x, float y, const char *text, Color c) {
+    if (g_font == nullptr) {
+        return;
+    }
     float penX = x;
+    float baseline = y + (TextLineHeight() + TextCapHeight()) * 0.5f;
     for (const unsigned char *p = (const unsigned char *)text; *p != '\0'; ++p) {
-        int codepoint = *p;
-        if (codepoint >= kFontFirstChar && codepoint < kFontFirstChar + kFontCharCount) {
-            int cell = codepoint - kFontFirstChar;
-            float u0 = (float)cell / (float)kFontCharCount;
-            float u1 = (float)(cell + 1) / (float)kFontCharCount;
-            PushGlyph(ui, penX, y, u0, u1, c);
+        const UiGlyphMetric *g = GlyphFor(*p);
+        if (g->width > 0.0f) {
+            float gx = penX + g->offsetX;
+            float gy = baseline - g->offsetY;
+            PushGlyphQuad(ui, gx, gy, gx + g->width, gy + g->height, g->u0, g->v0, g->u1, g->v1, c);
         }
-        penX += kGlyphPixels * kTextScale;
+        penX += g->advance;
     }
 }
 
 float TextWidth(const char *text) {
-    return (float)strlen(text) * kGlyphPixels * kTextScale;
+    if (g_font == nullptr) {
+        return (float)strlen(text) * kFallbackLineHeight;
+    }
+    float w = 0.0f;
+    for (const unsigned char *p = (const unsigned char *)text; *p != '\0'; ++p) {
+        w += GlyphFor(*p)->advance;
+    }
+    return w;
+}
+
+float TextWidthN(const char *text, int n) {
+    if (g_font == nullptr) {
+        return (float)n * kFallbackLineHeight;
+    }
+    float w = 0.0f;
+    for (int i = 0; i < n && text[i] != '\0'; ++i) {
+        w += GlyphFor((unsigned char)text[i])->advance;
+    }
+    return w;
 }
 
 bool Button(UiState *ui, int id, Rect r, const char *label) {
@@ -239,7 +308,7 @@ bool Button(UiState *ui, int id, Rect r, const char *label) {
 
     float textWidth = TextWidth(label);
     float textX = r.x + (r.w - textWidth) * 0.5f;
-    float textY = r.y + (r.h - kGlyphHeight * kTextScale) * 0.5f;
+    float textY = r.y + (r.h - TextLineHeight()) * 0.5f;
     PushText(ui, textX, textY, label, kTextCol);
     return clicked;
 }
@@ -376,7 +445,7 @@ void MenuDraw(UiState *ui) {
 
     PushRect(ui, {0.0f, 0.0f, ui->drawableWidth, kMenuBarHeight}, kMenuBarBg);
 
-    float titleTextY = (kMenuBarHeight - kGlyphHeight * kTextScale) * 0.5f;
+    float titleTextY = (kMenuBarHeight - TextLineHeight()) * 0.5f;
     for (int i = 0; i < ui->menuBar.menuCount; ++i) {
         Rect titleRect = MenuTitleRect(ui, i);
         bool hovered = PointInRect(ui->mouseX, ui->mouseY, titleRect);
@@ -398,7 +467,7 @@ void MenuDraw(UiState *ui) {
 
     for (int i = 0; i < menu.entryCount; ++i) {
         Rect row = {dropdown.x, dropdown.y + (float)i * kMenuRowHeight, dropdown.w, kMenuRowHeight};
-        float textY = row.y + (kMenuRowHeight - kGlyphHeight * kTextScale) * 0.5f;
+        float textY = row.y + (kMenuRowHeight - TextLineHeight()) * 0.5f;
 
         const Command *command = CommandById(menu.entries[i]);
         if (command == nullptr) {
@@ -474,6 +543,10 @@ float DockLimit(const UiState *ui, int dock) {
     return (ui->drawableHeight - ui->menuBarHeight) * kDockMaxFraction;
 }
 
+float DockMinSize(int dock) {
+    return (dock == UiDock_Left || dock == UiDock_Right) ? kPanelMinDockW : kPanelMinDockH;
+}
+
 Rect DockRect(const UiState *ui, int dock, float size) {
     float top = ui->menuBarHeight;
     float fullH = ui->drawableHeight - top;
@@ -494,29 +567,44 @@ void ResolvePanelLayout(UiState *ui) {
 
     for (int i = 0; i < kMaxPanels; ++i) {
         ui->panelRects[i] = {0.0f, 0.0f, 0.0f, 0.0f};
+    }
+
+    // Docked panels resolve in a fixed dock priority, not panel order: Top and
+    // Bottom claim the full width first, then Left and Right split the band
+    // between them. So a bottom-docked timeline spans the whole window and the
+    // side panels stack above it. Sizes are floored so every panel edge and
+    // the viewport rect land on the same integer pixel grid (no 1px seam).
+    const int dockOrder[] = {UiDock_Top, UiDock_Bottom, UiDock_Left, UiDock_Right};
+    for (int pass = 0; pass < 4; ++pass) {
+        int dock = dockOrder[pass];
+        for (int i = 0; i < kMaxPanels; ++i) {
+            PanelState &p = ui->panels[i];
+            if (p.id == 0 || p.id == ui->draggedPanel || p.dock != dock) {
+                continue;
+            }
+            float size = floorf(Clamp(p.dockSize, DockMinSize(dock), DockLimit(ui, dock)));
+            if (dock == UiDock_Left) {
+                ui->panelRects[i] = {free.x, free.y, size, free.h};
+                free.x += size;
+                free.w -= size;
+            } else if (dock == UiDock_Right) {
+                ui->panelRects[i] = {free.x + free.w - size, free.y, size, free.h};
+                free.w -= size;
+            } else if (dock == UiDock_Top) {
+                ui->panelRects[i] = {free.x, free.y, free.w, size};
+                free.y += size;
+                free.h -= size;
+            } else {
+                ui->panelRects[i] = {free.x, free.y + free.h - size, free.w, size};
+                free.h -= size;
+            }
+        }
+    }
+
+    for (int i = 0; i < kMaxPanels; ++i) {
         PanelState &p = ui->panels[i];
-        if (p.id == 0 || p.id == ui->draggedPanel) {
-            continue;
-        }
-        if (p.dock == UiDock_Float) {
+        if (p.id != 0 && p.id != ui->draggedPanel && p.dock == UiDock_Float) {
             ui->panelRects[i] = ClampFloatRect(ui, p.floatRect);
-            continue;
-        }
-        float size = Clamp(p.dockSize, kPanelMinDockSize, DockLimit(ui, p.dock));
-        if (p.dock == UiDock_Left) {
-            ui->panelRects[i] = {free.x, free.y, size, free.h};
-            free.x += size;
-            free.w -= size;
-        } else if (p.dock == UiDock_Right) {
-            ui->panelRects[i] = {free.x + free.w - size, free.y, size, free.h};
-            free.w -= size;
-        } else if (p.dock == UiDock_Top) {
-            ui->panelRects[i] = {free.x, free.y, free.w, size};
-            free.y += size;
-            free.h -= size;
-        } else {
-            ui->panelRects[i] = {free.x, free.y + free.h - size, free.w, size};
-            free.h -= size;
         }
     }
 
@@ -581,7 +669,7 @@ void UpdatePanelInteraction(UiState *ui) {
             outline = {ui->mouseX - ui->dragGrabX, ui->mouseY - ui->dragGrabY, ui->dragW, ui->dragH};
         } else {
             float want = (preview == UiDock_Left || preview == UiDock_Right) ? ui->dragW : ui->dragH;
-            outline = DockRect(ui, preview, Clamp(want, kPanelMinDockSize, DockLimit(ui, preview)));
+            outline = DockRect(ui, preview, Clamp(want, DockMinSize(preview), DockLimit(ui, preview)));
         }
         ui->dragOutline = outline;
         ui->dragPreviewDock = preview;
@@ -615,7 +703,7 @@ void UpdatePanelInteraction(UiState *ui) {
             } else if (p.dock == UiDock_Bottom) {
                 size = r.y + r.h - ui->mouseY;
             }
-            p.dockSize = Clamp(size, kPanelMinDockSize, DockLimit(ui, p.dock));
+            p.dockSize = Clamp(size, DockMinSize(p.dock), DockLimit(ui, p.dock));
         }
         if (!ui->mouseDown) {
             ui->resizePanel = 0;
@@ -665,53 +753,16 @@ void UpdatePanelInteraction(UiState *ui) {
 
 // ---- 3D-editor toolbar ----------------------------------------------
 
-enum { ToolBtn_Mode, ToolBtn_Action, ToolBtn_Toggle };
-
 struct ToolButtonDef {
     const char *label;
-    int kind;
-    int modeValue;                       // ToolBtn_Mode: value written into *editor.toolMode
-    void (*run)(const UiEditorState *e);  // ToolBtn_Action / ToolBtn_Toggle
-    bool (*isOn)(const UiEditorState *e); // extra highlight test (ToolBtn_Toggle)
+    const char *shortcut; // shown in the hover tooltip
+    int modeValue;        // value written into *editor.toolMode
 };
 
-void ToolRunAddSource(const UiEditorState *e) {
-    if (e->addSource != nullptr) {
-        e->addSource(e->context);
-    }
-}
-
-void ToolRunAddListener(const UiEditorState *e) {
-    if (e->addListener != nullptr) {
-        e->addListener(e->context);
-    }
-}
-
-void ToolRunFrameSelected(const UiEditorState *e) {
-    if (e->frameSelected != nullptr) {
-        e->frameSelected(e->context);
-    }
-}
-
-void ToolRunToggleSnap(const UiEditorState *e) {
-    if (e->snapEnabled != nullptr) {
-        *e->snapEnabled = !*e->snapEnabled;
-    }
-}
-
-bool ToolSnapOn(const UiEditorState *e) {
-    return e->snapEnabled != nullptr && *e->snapEnabled;
-}
-
 const ToolButtonDef kToolButtons[] = {
-    {"Select", ToolBtn_Mode, UiTool_Select, nullptr, nullptr},
-    {"Translate", ToolBtn_Mode, UiTool_Translate, nullptr, nullptr},
-    {"Rotate", ToolBtn_Mode, UiTool_Rotate, nullptr, nullptr},
-    {"Scale", ToolBtn_Mode, UiTool_Scale, nullptr, nullptr},
-    {"Add Source", ToolBtn_Action, 0, ToolRunAddSource, nullptr},
-    {"Add Listener", ToolBtn_Action, 0, ToolRunAddListener, nullptr},
-    {"Snap", ToolBtn_Toggle, 0, ToolRunToggleSnap, ToolSnapOn},
-    {"Frame Selected", ToolBtn_Action, 0, ToolRunFrameSelected, nullptr},
+    {"Move", "1", UiTool_Translate},
+    {"Rotate", "2", UiTool_Rotate},
+    {"Scale", "3", UiTool_Scale},
 };
 constexpr int kToolButtonCount = (int)(sizeof(kToolButtons) / sizeof(kToolButtons[0]));
 
@@ -722,13 +773,7 @@ constexpr float kToolButtonGap = 4.0f;
 constexpr float kToolbarInsetY = 6.0f;
 
 bool ToolButtonOn(const ToolButtonDef &def, const UiEditorState *e) {
-    if (def.kind == ToolBtn_Mode) {
-        return e->toolMode != nullptr && *e->toolMode == def.modeValue;
-    }
-    if (def.isOn != nullptr) {
-        return def.isOn(e);
-    }
-    return false;
+    return e->toolMode != nullptr && *e->toolMode == def.modeValue;
 }
 
 bool ToolButtonWidget(UiState *ui, int id, Rect r, const char *label, bool on) {
@@ -750,12 +795,13 @@ bool ToolButtonWidget(UiState *ui, int id, Rect r, const char *label, bool on) {
     PushRect(ui, r, background);
 
     float textX = r.x + (r.w - TextWidth(label)) * 0.5f;
-    float textY = r.y + (r.h - kGlyphHeight * kTextScale) * 0.5f;
+    float textY = r.y + (r.h - TextLineHeight()) * 0.5f;
     PushText(ui, textX, textY, label, kTextCol);
     return clicked;
 }
 
-constexpr float kTimelinePixelsPerSecond = 40.0f;
+constexpr float kTimelineMinPixelsPerSecond = 6.0f;
+constexpr float kTimelineMaxPixelsPerSecond = 400.0f;
 constexpr float kTimelineTransportHeight = 26.0f;
 constexpr float kTimelineRulerHeight = 28.0f;
 constexpr float kTimelineLaneHeight = 34.0f;
@@ -786,17 +832,19 @@ struct TimelineLayout {
     float rulerRight;
     float lanesY;
     float bodyBottom;
+    float pixelsPerSecond;  // zoom
+    double scrollSeconds;   // time at the ruler's left edge
     int laneCount;
     TrackId laneTracks[kMaxTimelineTracks];
     TimelineTrack laneInfo[kMaxTimelineTracks];
 };
 
-float TimelineTimeToX(float rulerX, double seconds) {
-    return rulerX + (float)(seconds * kTimelinePixelsPerSecond);
+float TimelineTimeToX(const TimelineLayout &layout, double seconds) {
+    return layout.rulerX + (float)((seconds - layout.scrollSeconds) * layout.pixelsPerSecond);
 }
 
-double TimelineXToTime(float rulerX, float x) {
-    double seconds = (double)(x - rulerX) / kTimelinePixelsPerSecond;
+double TimelineXToTime(const TimelineLayout &layout, float x) {
+    double seconds = layout.scrollSeconds + (double)(x - layout.rulerX) / layout.pixelsPerSecond;
     return seconds < 0.0 ? 0.0 : seconds;
 }
 
@@ -859,16 +907,20 @@ void BuildTimelineTransport(UiState *ui, TimelineState *timeline, Rect row) {
 
     char readout[16];
     FormatTransportTime(TimelineTime(timeline), readout, sizeof(readout));
-    PushText(ui, row.x + 178.0f, row.y + (row.h - kGlyphHeight * kTextScale) * 0.5f, readout,
+    PushText(ui, row.x + 178.0f, row.y + (row.h - TextLineHeight()) * 0.5f, readout,
              kTextCol);
 }
 
 void BuildTimelineRuler(UiState *ui, TimelineState *timeline, const TimelineLayout &layout) {
     PushRect(ui, layout.ruler, theme::TimelineRuler);
 
-    double endTime = TimelineXToTime(layout.rulerX, layout.rulerRight);
-    for (int second = 0; (double)second <= endTime; ++second) {
-        float x = TimelineTimeToX(layout.rulerX, second);
+    int firstSecond = (int)layout.scrollSeconds;
+    if (firstSecond < 0) {
+        firstSecond = 0;
+    }
+    double endTime = TimelineXToTime(layout, layout.rulerRight);
+    for (int second = firstSecond; (double)second <= endTime; ++second) {
+        float x = TimelineTimeToX(layout, second);
         bool labelled = (second % kTimelineRulerLabelSeconds) == 0;
         float tickHeight = labelled ? 10.0f : 5.0f;
         PushRect(ui, {x, layout.ruler.y + layout.ruler.h - tickHeight, 1.0f, tickHeight},
@@ -883,19 +935,19 @@ void BuildTimelineRuler(UiState *ui, TimelineState *timeline, const TimelineLayo
         }
     }
 
-    float playheadX = TimelineTimeToX(layout.rulerX, TimelineTime(timeline));
+    float playheadX = TimelineTimeToX(layout, TimelineTime(timeline));
     Rect grab = {playheadX - kTimelinePlayheadGrabPx, layout.ruler.y,
                  kTimelinePlayheadGrabPx * 2.0f, layout.ruler.h};
     if (ui->activeId == 0 && ui->mousePressed) {
         if (PointInRect(ui->mouseX, ui->mouseY, grab)) {
             ui->activeId = kTimelinePlayheadId;
         } else if (PointInRect(ui->mouseX, ui->mouseY, layout.ruler)) {
-            TimelineSeek(timeline, TimelineXToTime(layout.rulerX, ui->mouseX));
+            TimelineSeek(timeline, TimelineXToTime(layout, ui->mouseX));
         }
     }
 
     if (ui->activeId == kTimelinePlayheadId) {
-        TimelineScrub(timeline, TimelineXToTime(layout.rulerX, ui->mouseX));
+        TimelineScrub(timeline, TimelineXToTime(layout, ui->mouseX));
         if (ui->mouseReleased) {
             TimelineScrubEnd(timeline);
         }
@@ -912,7 +964,7 @@ void DrawTimelineLanes(UiState *ui, const TimelineLayout &layout) {
                        kTimelineLaneHeight};
         PushRect(ui, header, theme::TimelineLaneHeader);
 
-        float textY = y + (kTimelineLaneHeight - kGlyphHeight * kTextScale) * 0.5f;
+        float textY = y + (kTimelineLaneHeight - TextLineHeight()) * 0.5f;
         char name[7];
         strncpy(name, layout.laneInfo[lane].name, sizeof(name) - 1);
         name[sizeof(name) - 1] = '\0';
@@ -949,7 +1001,7 @@ void BuildTimelineClips(UiState *ui, TimelineState *timeline, SceneState *scene,
         bool dragging = ui->timelineDragClip == id && ui->timelineDragMode != TimelineDrag_None;
         if (dragging) {
             double delta =
-                (double)(ui->mouseX - ui->timelineDragGrabX) / kTimelinePixelsPerSecond;
+                (double)(ui->mouseX - ui->timelineDragGrabX) / layout.pixelsPerSecond;
             if (ui->timelineDragMode == TimelineDrag_Move) {
                 startTime = ui->timelineDragStartTime + delta;
                 if (startTime < 0.0) {
@@ -979,8 +1031,8 @@ void BuildTimelineClips(UiState *ui, TimelineState *timeline, SceneState *scene,
         }
 
         float laneY = layout.lanesY + drawLane * kTimelineLaneHeight;
-        Rect r = {TimelineTimeToX(layout.rulerX, startTime), laneY + 3.0f,
-                  (float)(duration * kTimelinePixelsPerSecond), kTimelineLaneHeight - 6.0f};
+        Rect r = {TimelineTimeToX(layout, startTime), laneY + 3.0f,
+                  (float)(duration * layout.pixelsPerSecond), kTimelineLaneHeight - 6.0f};
 
         bool selected = SceneSelectionContains(scene, TimelineClipSelectionItem(id));
         if (ui->activeId == 0 && ui->mousePressed && PointInRect(ui->mouseX, ui->mouseY, r)) {
@@ -1031,12 +1083,43 @@ void BuildTimelineClips(UiState *ui, TimelineState *timeline, SceneState *scene,
 }
 
 void DrawTimelinePlayhead(UiState *ui, TimelineState *timeline, const TimelineLayout &layout) {
-    float x = TimelineTimeToX(layout.rulerX, TimelineTime(timeline));
+    float x = TimelineTimeToX(layout, TimelineTime(timeline));
     if (x < layout.rulerX || x > layout.rulerRight) {
         return;
     }
     float bottom = layout.lanesY + layout.laneCount * kTimelineLaneHeight;
     PushRect(ui, {x, layout.ruler.y, 2.0f, bottom - layout.ruler.y}, theme::Playhead);
+}
+
+// Ghost of where a hovered .wav drag would drop: a translucent clip block at
+// the snapped time on the target lane (or a "new track" row past the last
+// lane) plus an insertion line. No model change; uses the platform's
+// drag-hover fields.
+void DrawTimelineDropGhost(UiState *ui, FrameInput input, const TimelineLayout &layout) {
+    if (!input.dragHovering) {
+        return;
+    }
+    float hx = input.dragHoverX;
+    float hy = input.dragHoverY;
+    if (hx < layout.rulerX || hx > layout.rulerRight || hy < layout.ruler.y ||
+        hy > layout.bodyBottom) {
+        return;
+    }
+
+    int lane = TimelineLaneAtY(layout, hy);
+    float laneY = layout.lanesY + (float)(lane >= 0 ? lane : layout.laneCount) * kTimelineLaneHeight;
+    PushClippedRect(ui, {layout.rulerX, laneY, layout.rulerRight - layout.rulerX,
+                         kTimelineLaneHeight},
+                    layout.rulerX, layout.rulerRight, theme::TimelineLaneHeader);
+
+    float x = TimelineTimeToX(layout, TimelineXToTime(layout, hx));
+    float ghostW = 2.0f * layout.pixelsPerSecond;
+    int files = input.dragHoverFileCount > 0 ? input.dragHoverFileCount : 1;
+    for (int i = 0; i < files; ++i) {
+        Rect g = {x + (float)i * ghostW, laneY + 3.0f, ghostW - 2.0f, kTimelineLaneHeight - 6.0f};
+        PushClippedRect(ui, g, layout.rulerX, layout.rulerRight, theme::TimelineClipGhost);
+    }
+    PushRect(ui, {x, layout.ruler.y, 2.0f, layout.bodyBottom - layout.ruler.y}, theme::Playhead);
 }
 
 // A .wav dropped on a lane becomes a clip there; dropped past the last lane it
@@ -1054,7 +1137,7 @@ void HandleTimelineDrop(UiState *ui, FrameInput input, const TimelineLayout &lay
 
     int lane = TimelineLaneAtY(layout, input.dropY);
     TrackId track = lane >= 0 ? layout.laneTracks[lane] : kInvalidTrackId;
-    double dropTime = TimelineXToTime(layout.rulerX, input.dropX);
+    double dropTime = TimelineXToTime(layout, input.dropX);
 
     for (int i = 0; i < input.droppedFileCount; ++i) {
         ClipId wav = AudioLoadClip(ui->editor.audio, input.droppedFiles[i]);
@@ -1083,24 +1166,61 @@ void BuildTimelineBody(UiState *ui, FrameInput input) {
     }
 
     Rect body = ui->currentBody;
-    float lanesY = body.y + kTimelineTransportHeight + kRowGap + kTimelineRulerHeight;
+    float lanesTop = body.y + kTimelineTransportHeight + kRowGap + kTimelineRulerHeight;
     if (body.w < kTimelineHeaderWidth + 120.0f || body.h < kTimelineTransportHeight) {
         return;
     }
+
+    int trackCount = TimelineTrackCount(timeline);
+    float lanesViewH = (body.y + body.h) - lanesTop;
+    float lanesFullH = (float)trackCount * kTimelineLaneHeight;
+    float maxLaneScroll = lanesFullH > lanesViewH ? lanesFullH - lanesViewH : 0.0f;
+
+    // Scroll while the pointer is over the panel. Horizontal (trackpad swipe)
+    // always pans time. Vertical scrolls the lanes when they overflow, else
+    // also pans time; Shift forces time; Alt zooms about the cursor.
+    bool overBody = PointInRect(ui->mouseX, ui->mouseY, body);
+    if (overBody) {
+        float rulerX = body.x + kTimelineHeaderWidth;
+        if (input.alt && (input.scrollX != 0.0f || input.scrollY != 0.0f)) {
+            float w = input.scrollY != 0.0f ? input.scrollY : input.scrollX;
+            double cursorTime = ui->timelineScrollSeconds +
+                                (double)(ui->mouseX - rulerX) / ui->timelinePixelsPerSecond;
+            ui->timelinePixelsPerSecond =
+                Clamp(ui->timelinePixelsPerSecond * expf(w * 0.015f),
+                      kTimelineMinPixelsPerSecond, kTimelineMaxPixelsPerSecond);
+            ui->timelineScrollSeconds =
+                cursorTime - (double)(ui->mouseX - rulerX) / ui->timelinePixelsPerSecond;
+        } else if (input.shift && input.scrollY != 0.0f) {
+            ui->timelineScrollSeconds -= (double)input.scrollY / ui->timelinePixelsPerSecond;
+        } else {
+            if (input.scrollX != 0.0f) {
+                ui->timelineScrollSeconds -= (double)input.scrollX / ui->timelinePixelsPerSecond;
+            }
+            if (input.scrollY != 0.0f) {
+                ui->timelineLaneScroll -= input.scrollY; // vertical only scrolls lanes
+            }
+        }
+    }
+    if (ui->timelineScrollSeconds < 0.0) {
+        ui->timelineScrollSeconds = 0.0;
+    }
+    ui->timelineLaneScroll = Clamp(ui->timelineLaneScroll, 0.0f, maxLaneScroll);
 
     TimelineLayout layout;
     layout.rulerX = body.x + kTimelineHeaderWidth;
     layout.rulerRight = body.x + body.w;
     layout.ruler = {layout.rulerX, body.y + kTimelineTransportHeight + kRowGap,
                     layout.rulerRight - layout.rulerX, kTimelineRulerHeight};
-    layout.lanesY = lanesY;
+    layout.lanesY = lanesTop - ui->timelineLaneScroll;
     layout.bodyBottom = body.y + body.h;
+    layout.pixelsPerSecond = ui->timelinePixelsPerSecond;
+    layout.scrollSeconds = ui->timelineScrollSeconds;
 
-    int visibleLanes = (int)((layout.bodyBottom - lanesY) / kTimelineLaneHeight);
+    int visibleLanes = (int)(lanesViewH / kTimelineLaneHeight) + 2;
     if (visibleLanes < 0) {
         visibleLanes = 0;
     }
-    int trackCount = TimelineTrackCount(timeline);
     layout.laneCount = trackCount < visibleLanes ? trackCount : visibleLanes;
     for (int i = 0; i < layout.laneCount; ++i) {
         TimelineTrackAt(timeline, i, &layout.laneTracks[i], &layout.laneInfo[i]);
@@ -1111,12 +1231,209 @@ void BuildTimelineBody(UiState *ui, FrameInput input) {
     DrawTimelineLanes(ui, layout);
     BuildTimelineClips(ui, timeline, scene, layout);
     DrawTimelinePlayhead(ui, timeline, layout);
+    DrawTimelineDropGhost(ui, input, layout);
     HandleTimelineDrop(ui, input, layout);
 
     if (ui->timelineDragMode != TimelineDrag_None && !ui->mouseDown) {
         ui->timelineDragClip = kInvalidTimelineClipId; // the clip went away mid-drag
         ui->timelineDragMode = TimelineDrag_None;
     }
+}
+
+// ---- scene outliner (right panel) --------------------------------------
+
+enum { UiEdit_None = 0, UiEdit_Commit, UiEdit_Cancel };
+
+void BeginTextEdit(UiState *ui, int id, const char *initial) {
+    ui->focusedInputId = id;
+    strncpy(ui->editBuffer, initial, sizeof(ui->editBuffer) - 1);
+    ui->editBuffer[sizeof(ui->editBuffer) - 1] = '\0';
+    ui->editLen = (int)strlen(ui->editBuffer);
+    ui->editCaret = ui->editLen;
+}
+
+// Only called while ui->focusedInputId == id (start it with BeginTextEdit).
+// Consumes this frame's key events, renders the buffer + a blinking caret, and
+// returns UiEdit_Commit (Return / click-away, `out` filled) or UiEdit_Cancel
+// (Esc). Clears focus on either.
+int TextInputWidget(UiState *ui, Rect r, char *out, int outCap) {
+    int result = UiEdit_None;
+    for (int i = 0; i < ui->frameKeyCount && result == UiEdit_None; ++i) {
+        const KeyEvent &key = ui->frameKeys[i];
+        if (!key.pressed) {
+            continue;
+        }
+        unsigned int cp = key.codepoint;
+        if (key.keyCode == 36 || cp == 13) { // Return
+            result = UiEdit_Commit;
+        } else if (key.keyCode == 53 || cp == 27) { // Esc
+            result = UiEdit_Cancel;
+        } else if (cp == 127 || key.keyCode == 51) { // Backspace
+            if (ui->editCaret > 0) {
+                memmove(ui->editBuffer + ui->editCaret - 1, ui->editBuffer + ui->editCaret,
+                        (size_t)(ui->editLen - ui->editCaret + 1));
+                --ui->editCaret;
+                --ui->editLen;
+            }
+        } else if (key.keyCode == 123) { // Left
+            if (ui->editCaret > 0) --ui->editCaret;
+        } else if (key.keyCode == 124) { // Right
+            if (ui->editCaret < ui->editLen) ++ui->editCaret;
+        } else if (cp >= 32 && cp < 127 && ui->editLen < (int)sizeof(ui->editBuffer) - 1) {
+            memmove(ui->editBuffer + ui->editCaret + 1, ui->editBuffer + ui->editCaret,
+                    (size_t)(ui->editLen - ui->editCaret + 1));
+            ui->editBuffer[ui->editCaret] = (char)cp;
+            ++ui->editCaret;
+            ++ui->editLen;
+        }
+    }
+    if (result == UiEdit_None && ui->mousePressed && !PointInRect(ui->mouseX, ui->mouseY, r)) {
+        result = UiEdit_Commit;
+    }
+
+    PushRect(ui, r, kTrackCol);
+    PushBorder(ui, r, 1.0f, kResizeGripHot);
+    float textY = r.y + (r.h - TextLineHeight()) * 0.5f;
+    PushText(ui, r.x + 5.0f, textY, ui->editBuffer, kTextCol);
+    if ((ui->frameIndex / 30) % 2 == 0) {
+        float caretX = r.x + 5.0f + TextWidthN(ui->editBuffer, ui->editCaret);
+        PushRect(ui, {caretX, r.y + 4.0f, 2.0f, r.h - 8.0f}, kTextCol);
+    }
+
+    if (result == UiEdit_Commit) {
+        strncpy(out, ui->editBuffer, (size_t)outCap - 1);
+        out[outCap - 1] = '\0';
+    }
+    if (result != UiEdit_None) {
+        ui->focusedInputId = 0;
+    }
+    return result;
+}
+
+const char *EntityKindGlyph(EntityKind kind) {
+    if (kind == EntityKind_AudioSource) return "S";
+    if (kind == EntityKind_AudioListener) return "L";
+    return "M";
+}
+
+constexpr int kOutlinerAddId = 1000900;
+constexpr int kOutlinerRenameIdBase = 1002000;
+constexpr float kOutlinerRowHeight = 22.0f;
+
+void BuildOutliner(UiState *ui) {
+    SceneState *scene = ui->editor.scene;
+    if (ui->suppressBody || scene == nullptr) {
+        return;
+    }
+
+    Rect body = ui->currentBody;
+    float x = body.x;
+    float y = ui->panelCursorY;
+
+    Rect addRect = {x, y, 70.0f, kButtonHeight};
+    y += kButtonHeight + kRowGap;
+    if (ui->editor.requestAddMenu) {
+        ui->addMenuOpen = true;
+    }
+    if (Button(ui, kOutlinerAddId, addRect, "+ Add")) {
+        ui->addMenuOpen = !ui->addMenuOpen;
+    }
+
+    if (ui->addMenuOpen) {
+        struct KindOpt {
+            const char *label;
+            int kind;
+            int mesh;
+        };
+        const KindOpt opts[] = {
+            {"Cube", EntityKind_Mesh, MeshId_Cube},
+            {"Plane", EntityKind_Mesh, MeshId_Plane},
+            {"Source", EntityKind_AudioSource, 0},
+            {"Listener", EntityKind_AudioListener, 0},
+        };
+        Rect menuRect = {addRect.x, addRect.y + addRect.h, 150.0f, 4.0f * kMenuRowHeight};
+        PushRect(ui, menuRect, kMenuDropdownBg);
+        PushBorder(ui, menuRect, 1.0f, kPanelBorderCol);
+        bool pickedOrOutside = false;
+        for (int i = 0; i < 4; ++i) {
+            Rect row = {menuRect.x, menuRect.y + (float)i * kMenuRowHeight, menuRect.w,
+                        kMenuRowHeight};
+            bool hot = PointInRect(ui->mouseX, ui->mouseY, row);
+            if (hot) {
+                PushRect(ui, row, kMenuItemHot);
+            }
+            PushText(ui, row.x + 10.0f,
+                     row.y + (kMenuRowHeight - TextLineHeight()) * 0.5f, opts[i].label,
+                     kTextCol);
+            if (hot && ui->mousePressed) {
+                Transform t = TransformIdentity();
+                if (opts[i].kind == EntityKind_Mesh) {
+                    SceneCreateMeshEntityAt(scene, opts[i].label, (MeshId)opts[i].mesh, t);
+                } else {
+                    SceneCreateEntityAt(scene, (EntityKind)opts[i].kind, opts[i].label, t);
+                }
+                ui->addMenuOpen = false;
+                pickedOrOutside = true;
+            }
+        }
+        if (!pickedOrOutside && ui->mousePressed && !PointInRect(ui->mouseX, ui->mouseY, menuRect) &&
+            !PointInRect(ui->mouseX, ui->mouseY, addRect)) {
+            ui->addMenuOpen = false;
+        }
+        y += 4.0f * kMenuRowHeight + kRowGap;
+    }
+
+    SceneEntityRow rows[256];
+    int count = SceneEntities(scene, rows, 256);
+    for (int i = 0; i < count && y + kOutlinerRowHeight <= body.y + body.h; ++i) {
+        Rect row = {x, y, body.w, kOutlinerRowHeight};
+        y += kOutlinerRowHeight + 2.0f;
+
+        SelectionItem item = {SelectionKind_Entity, (uint32_t)rows[i].id};
+        if (SceneSelectionContains(scene, item)) {
+            PushRect(ui, row, kButtonActive);
+        }
+
+        float glyphY = row.y + (kOutlinerRowHeight - TextLineHeight()) * 0.5f;
+        PushText(ui, row.x + 2.0f, glyphY, EntityKindGlyph(rows[i].kind), kTextShortcut);
+
+        int renameId = kOutlinerRenameIdBase + i;
+        Rect nameRect = {row.x + 20.0f, row.y, row.w - 22.0f, kOutlinerRowHeight};
+
+        if (ui->focusedInputId == renameId) {
+            char newName[64];
+            if (TextInputWidget(ui, nameRect, newName, sizeof(newName)) == UiEdit_Commit &&
+                newName[0] != '\0') {
+                SceneRenameEntity(scene, rows[i].id, newName);
+            }
+        } else {
+            PushText(ui, nameRect.x + 3.0f, glyphY, rows[i].name, kTextCol);
+            if (ui->mousePressed && PointInRect(ui->mouseX, ui->mouseY, row)) {
+                bool doubleClick = ui->lastClickControlId == renameId &&
+                                   (ui->frameIndex - ui->lastClickFrame) < 18;
+                ui->lastClickControlId = renameId;
+                ui->lastClickFrame = ui->frameIndex;
+                if (doubleClick) {
+                    BeginTextEdit(ui, renameId, rows[i].name);
+                } else {
+                    SceneSelectionSet(scene, &item, 1);
+                }
+            }
+        }
+    }
+
+    ui->panelCursorY = y;
+}
+
+void DrawToolTooltip(UiState *ui, Rect button, const char *label, const char *shortcut) {
+    char text[48];
+    snprintf(text, sizeof(text), "%s  (%s)", label, shortcut);
+    float pad = 6.0f;
+    Rect box = {button.x, button.y + button.h + 6.0f, TextWidth(text) + pad * 2.0f,
+                TextLineHeight() + pad * 2.0f};
+    PushRect(ui, box, theme::ToolbarBg);
+    PushBorder(ui, box, 1.0f, kPanelBorderCol);
+    PushText(ui, box.x + pad, box.y + pad, text, kTextCol);
 }
 
 void BuildToolbar(UiState *ui) {
@@ -1143,15 +1460,13 @@ void BuildToolbar(UiState *ui) {
         const ToolButtonDef &def = kToolButtons[i];
         Rect r = {penX, btnY, widths[i], kToolButtonHeight};
         penX += widths[i] + kToolButtonGap;
+        int buttonId = 700000 + i;
         bool on = ToolButtonOn(def, &ui->editor);
-        if (ToolButtonWidget(ui, 700000 + i, r, def.label, on)) {
-            if (def.kind == ToolBtn_Mode) {
-                if (ui->editor.toolMode != nullptr) {
-                    *ui->editor.toolMode = def.modeValue;
-                }
-            } else if (def.run != nullptr) {
-                def.run(&ui->editor);
-            }
+        if (ToolButtonWidget(ui, buttonId, r, def.label, on) && ui->editor.toolMode != nullptr) {
+            *ui->editor.toolMode = def.modeValue;
+        }
+        if (ui->hotId == buttonId) {
+            DrawToolTooltip(ui, r, def.label, def.shortcut);
         }
     }
 
@@ -1162,8 +1477,12 @@ void BuildToolbar(UiState *ui) {
 
 UiState *UiInit(Arena *arena, float drawableWidth, float drawableHeight) {
     UiState *ui = ArenaPushStruct(arena, UiState);
+    ui->uiScale = 1.0f;
+    ui->realDrawableWidth = drawableWidth;
+    ui->realDrawableHeight = drawableHeight;
     ui->drawableWidth = drawableWidth;
     ui->drawableHeight = drawableHeight;
+    ui->timelinePixelsPerSecond = 40.0f;
     ui->menuBar = MenuBarDefault();
     ui->openMenu = -1;
     ui->contentRect = {0.0f, 0.0f, drawableWidth, drawableHeight};
@@ -1171,8 +1490,10 @@ UiState *UiInit(Arena *arena, float drawableWidth, float drawableHeight) {
 }
 
 void UiHandleResize(UiState *ui, float drawableWidth, float drawableHeight) {
-    ui->drawableWidth = drawableWidth;
-    ui->drawableHeight = drawableHeight;
+    ui->realDrawableWidth = drawableWidth;
+    ui->realDrawableHeight = drawableHeight;
+    ui->drawableWidth = drawableWidth / ui->uiScale;
+    ui->drawableHeight = drawableHeight / ui->uiScale;
     for (int i = 0; i < kMaxPanels; ++i) {
         if (ui->panels[i].id != 0 && ui->panels[i].dock == UiDock_Float) {
             ui->panels[i].floatRect = ClampFloatRect(ui, ui->panels[i].floatRect);
@@ -1180,15 +1501,43 @@ void UiHandleResize(UiState *ui, float drawableWidth, float drawableHeight) {
     }
 }
 
-void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiDemoState *demo) {
+void UiSetUiScale(UiState *ui, float scale) {
+    ui->uiScale = Clamp(scale, 0.6f, 2.5f);
+    UiHandleResize(ui, ui->realDrawableWidth, ui->realDrawableHeight);
+}
+
+void UiAdjustUiScale(UiState *ui, float delta) { UiSetUiScale(ui, ui->uiScale + delta); }
+
+float UiUiScale(const UiState *ui) { return ui->uiScale; }
+
+void UiSetFontMetrics(UiState *ui, const UiFontMetrics *metrics) {
+    (void)ui;
+    g_font = metrics;
+}
+
+void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext) {
     ui->vertexCount = 0;
     ui->menuContext = menuContext;
+
+    // Everything below works in logical units; bring the platform's real-pixel
+    // pointer/drop coordinates into that space.
+    float invScale = 1.0f / ui->uiScale;
+    input.mouseX *= invScale;
+    input.mouseY *= invScale;
+    input.dropX *= invScale;
+    input.dropY *= invScale;
+    input.dragHoverX *= invScale;
+    input.dragHoverY *= invScale;
+
     ui->mouseX = input.mouseX;
     ui->mouseY = input.mouseY;
     ui->mouseDown = input.mouseLeftDown;
     ui->mousePressed = input.mouseLeftDown && !ui->prevMouseDown;
     ui->mouseReleased = !input.mouseLeftDown && ui->prevMouseDown;
     ui->hotId = 0;
+    ui->frameKeys = input.keyEvents;
+    ui->frameKeyCount = input.keyEventCount;
+    ++ui->frameIndex;
 
     ui->menuBarVisible = input.fullscreen || menuContext.menuState->showMenuBar;
     ui->menuBarHeight = ui->menuBarVisible ? kMenuBarHeight : 0.0f;
@@ -1201,12 +1550,8 @@ void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiD
     UpdatePanelInteraction(ui);
     ResolvePanelLayout(ui); // reflect a drag/resize that started or ended this frame
 
-    UiBeginPanel(ui, 1, "Controls", UiDock_Right, 264.0f);
-    UiPanelButton(ui, "Button A");
-    UiPanelButton(ui, "Button B");
-    UiPanelButton(ui, "Reset");
-    UiPanelSlider(ui, "Speed", &demo->speed);
-    UiPanelSlider(ui, "Zoom", &demo->zoom);
+    UiBeginPanel(ui, 1, "Objects", UiDock_Right, 264.0f);
+    BuildOutliner(ui);
     UiEndPanel(ui);
 
     UiBeginPanel(ui, 2, "Scene", UiDock_Left, 208.0f);
@@ -1224,6 +1569,11 @@ void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiD
 
     if (ui->draggedPanel != 0) {
         PushBorder(ui, ui->dragOutline, 2.0f, kDragOutlineCol);
+    }
+
+    if (ui->marqueeActive) {
+        PushRect(ui, ui->marqueeRect, theme::MarqueeFill);
+        PushBorder(ui, ui->marqueeRect, 1.0f, kDragOutlineCol);
     }
 
     BuildToolbar(ui);
@@ -1257,7 +1607,7 @@ void UiBeginPanel(UiState *ui, UiPanelId id, const char *title, int initialDock,
     bool titleHot = ui->draggedPanel == 0 && ui->resizePanel == 0 &&
                     PointInRect(ui->mouseX, ui->mouseY, titleBar);
     PushRect(ui, titleBar, titleHot ? kTitleBarHot : kTitleBarCol);
-    PushText(ui, r.x + 8.0f, r.y + (kTitleBarHeight - kGlyphHeight * kTextScale) * 0.5f, title,
+    PushText(ui, r.x + 8.0f, r.y + (kTitleBarHeight - TextLineHeight()) * 0.5f, title,
              kTextCol);
 
     Rect grip = ResizeGripRect(ui, slot);
@@ -1305,7 +1655,7 @@ void UiPanelText(UiState *ui, const char *text) {
         return;
     }
     PushText(ui, ui->currentBody.x, ui->panelCursorY, text, kTextCol);
-    ui->panelCursorY += kGlyphHeight * kTextScale + kRowGap;
+    ui->panelCursorY += TextLineHeight() + kRowGap;
 }
 
 CommandId UiTakeCommand(UiState *ui) {
@@ -1318,11 +1668,24 @@ void UiSetEditorState(UiState *ui, UiEditorState editor) {
     ui->editor = editor;
 }
 
+void UiSetMarquee(UiState *ui, bool active, float x0, float y0, float x1, float y1) {
+    ui->marqueeActive = active;
+    float s = 1.0f / ui->uiScale; // caller passes real pixels; store logical
+    x0 *= s;
+    y0 *= s;
+    x1 *= s;
+    y1 *= s;
+    float minX = x0 < x1 ? x0 : x1;
+    float minY = y0 < y1 ? y0 : y1;
+    ui->marqueeRect = {minX, minY, fabsf(x1 - x0), fabsf(y1 - y0)};
+}
+
 bool UiWantsMouse(const UiState *ui) {
     if (ui->menuHasPointer || ui->openMenu >= 0) {
         return true;
     }
-    if (ui->draggedPanel != 0 || ui->resizePanel != 0 || ui->activeId != 0) {
+    if (ui->draggedPanel != 0 || ui->resizePanel != 0 || ui->activeId != 0 ||
+        ui->focusedInputId != 0) {
         return true;
     }
     if (ui->toolbarRect.w > 0.0f && PointInRect(ui->mouseX, ui->mouseY, ui->toolbarRect)) {
@@ -1337,31 +1700,35 @@ bool UiWantsMouse(const UiState *ui) {
 }
 
 bool UiWantsKeyboard(const UiState *ui) {
-    return ui->openMenu >= 0;
+    return ui->openMenu >= 0 || ui->focusedInputId != 0;
 }
 
+// The content rect and drawable size are consumed by the renderer / platform
+// in real drawable pixels, so scale the logical layout values back up.
 float UiContentOriginX(const UiState *ui) {
-    return ui->contentRect.x;
+    return ui->contentRect.x * ui->uiScale;
 }
 
 float UiContentOriginY(const UiState *ui) {
-    return ui->contentRect.y;
+    return ui->contentRect.y * ui->uiScale;
 }
 
 float UiContentWidth(const UiState *ui) {
-    return ui->contentRect.w < 1.0f ? 1.0f : ui->contentRect.w;
+    float w = ui->contentRect.w * ui->uiScale;
+    return w < 1.0f ? 1.0f : w;
 }
 
 float UiContentHeight(const UiState *ui) {
-    return ui->contentRect.h < 1.0f ? 1.0f : ui->contentRect.h;
+    float h = ui->contentRect.h * ui->uiScale;
+    return h < 1.0f ? 1.0f : h;
 }
 
 float UiDrawableWidth(const UiState *ui) {
-    return ui->drawableWidth;
+    return ui->realDrawableWidth;
 }
 
 float UiDrawableHeight(const UiState *ui) {
-    return ui->drawableHeight;
+    return ui->realDrawableHeight;
 }
 
 const UiVertex *UiVertices(const UiState *ui) {

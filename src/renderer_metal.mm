@@ -53,6 +53,7 @@ const Vec3 kLightDirectionWorld = {0.4f, 1.0f, 0.6f};
 struct GeoUniforms {
     Mat4 modelViewProjection;
     Mat4 modelView;
+    float baseColor[4]; // per-draw albedo: white unselected, blue selected
 };
 
 struct AoParams {
@@ -139,12 +140,14 @@ struct VertexIn {
 struct GeoUniforms {
     float4x4 modelViewProjection;
     float4x4 modelView;
+    float4 baseColor;
 };
 
 struct GeoVertexOut {
     float4 position [[position]];
     float viewZ;
     float3 viewNormal;
+    float3 baseColor;
 };
 
 vertex GeoVertexOut geometry_vertex(VertexIn in [[stage_in]],
@@ -153,14 +156,23 @@ vertex GeoVertexOut geometry_vertex(VertexIn in [[stage_in]],
     out.position = uniforms.modelViewProjection * float4(in.position, 1.0);
     out.viewZ = (uniforms.modelView * float4(in.position, 1.0)).z;
     out.viewNormal = (uniforms.modelView * float4(in.normal, 0.0)).xyz;
+    out.baseColor = uniforms.baseColor.rgb;
     return out;
 }
 
-// Single g-buffer target: xyz = view-space normal, w = view-space Z (always
-// negative for real geometry). The pass clears w to 1.0, so w >= 0.5 means
-// "background". View-space X/Y are reconstructed from uv + w + projection.
-fragment float4 geometry_fragment(GeoVertexOut in [[stage_in]]) {
-    return float4(normalize(in.viewNormal), in.viewZ);
+// G-buffer: color(0) xyz = view-space normal, w = view-space Z (always
+// negative for real geometry; the pass clears w to 1.0, so w >= 0.5 means
+// "background"). color(1) rgb = per-object albedo the lighting pass shades.
+struct GeoOut {
+    float4 gbuffer [[color(0)]];
+    float4 albedo [[color(1)]];
+};
+
+fragment GeoOut geometry_fragment(GeoVertexOut in [[stage_in]]) {
+    GeoOut out;
+    out.gbuffer = float4(normalize(in.viewNormal), in.viewZ);
+    out.albedo = float4(in.baseColor, 1.0);
+    return out;
 }
 
 float3 ReconstructViewPosition(float2 uv, float viewZ, float4x4 projection) {
@@ -241,6 +253,7 @@ struct LightParams {
 fragment float4 lighting_fragment(FullscreenOut in [[stage_in]],
                                   texture2d<float> normalTexture [[texture(1)]],
                                   texture2d<float> aoTexture [[texture(2)]],
+                                  texture2d<float> albedoTexture [[texture(3)]],
                                   constant LightParams &params [[buffer(0)]]) {
     constexpr sampler pointSampler(address::clamp_to_edge, filter::nearest);
     constexpr sampler linearSampler(address::clamp_to_edge, filter::linear);
@@ -269,7 +282,8 @@ fragment float4 lighting_fragment(FullscreenOut in [[stage_in]],
     float3 lightDirection = normalize(params.lightDirectionView.xyz);
     float diffuse = max(dot(normal, lightDirection), 0.0);
     float ambientOcclusion = (debugMode == 2) ? 1.0 : ao;
-    float3 baseColor = kThemeMeshBase;
+    constexpr sampler albedoSampler(address::clamp_to_edge, filter::nearest);
+    float3 baseColor = albedoTexture.sample(albedoSampler, in.uv).rgb;
     float3 color = baseColor * (0.35 * ambientOcclusion + 0.65 * diffuse);
     return float4(color, 1.0);
 }
@@ -439,6 +453,7 @@ struct RendererState {
     id<MTLBuffer> uniformBuffer;
 
     id<MTLTexture> gNormalTexture;
+    id<MTLTexture> gAlbedoTexture;
     id<MTLTexture> sceneDepthTexture;
     id<MTLTexture> aoRawTexture;
     id<MTLTexture> litColorTexture;
@@ -497,6 +512,7 @@ void AllocateScreenTargets(RendererState *state, uint32_t width, uint32_t height
     floatTarget.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     floatTarget.storageMode = MTLStorageModePrivate;
     state->gNormalTexture = [state->device newTextureWithDescriptor:floatTarget];
+    state->gAlbedoTexture = [state->device newTextureWithDescriptor:floatTarget];
 
     MTLTextureDescriptor *depthTarget =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:state->depthFormat
@@ -673,6 +689,7 @@ RendererState *RendererInit(Arena *arena, GpuContext *gpu, float drawableWidth,
     geometryDescriptor.fragmentFunction = [library newFunctionWithName:@"geometry_fragment"];
     geometryDescriptor.vertexDescriptor = vertexDescriptor;
     geometryDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+    geometryDescriptor.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
     geometryDescriptor.depthAttachmentPixelFormat = depthFormat;
 
     NSError *geometryError = nil;
@@ -760,7 +777,7 @@ void RendererSetContentRect(RendererState *renderer, float originX, float origin
                                             renderer->cameraYaw, renderer->cameraPitch);
     renderer->viewProjection = Mat4Multiply(renderer->projection, renderer->view);
 
-    AllocateScreenTargets(renderer, (uint32_t)width, (uint32_t)height);
+    AllocateScreenTargets(renderer, (uint32_t)(width + 0.5f), (uint32_t)(height + 0.5f));
 }
 
 void RendererUpdateCamera(RendererState *renderer, FrameInput input) {
@@ -837,6 +854,9 @@ void EncodeGeometryPass(RendererState *renderer, const RendererSceneView *view,
     pass.colorAttachments[0].clearColor =
         MTLClearColorMake(gBufferClear.r, gBufferClear.g, gBufferClear.b, 1.0);
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[1].texture = renderer->gAlbedoTexture;
+    pass.colorAttachments[1].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[1].storeAction = MTLStoreActionStore;
     pass.depthAttachment.texture = renderer->sceneDepthTexture;
     pass.depthAttachment.loadAction = MTLLoadActionClear;
     pass.depthAttachment.clearDepth = 1.0;
@@ -853,6 +873,9 @@ void EncodeGeometryPass(RendererState *renderer, const RendererSceneView *view,
     static SceneMeshView meshViews[kMaxMeshRenderers];
     int meshCount = SceneMeshRenderers(view->scene, meshViews, kMaxMeshRenderers);
 
+    theme::Rgba meshBaseColor = theme::ToFloat(theme::MeshBase);
+    theme::Rgba meshSelectedColor = theme::ToFloat(theme::MeshSelected);
+
     uint8_t *uniformContents = (uint8_t *)[renderer->uniformBuffer contents];
     for (int i = 0; i < meshCount; ++i) {
         const SceneMeshView &object = meshViews[i];
@@ -862,6 +885,13 @@ void EncodeGeometryPass(RendererState *renderer, const RendererSceneView *view,
         GeoUniforms uniforms;
         uniforms.modelViewProjection = Mat4Multiply(renderer->viewProjection, model);
         uniforms.modelView = Mat4Multiply(renderer->view, model);
+        bool selected = SceneSelectionContains(
+            view->scene, SelectionItem{SelectionKind_Entity, (uint32_t)object.entity});
+        const theme::Rgba &albedo = selected ? meshSelectedColor : meshBaseColor;
+        uniforms.baseColor[0] = albedo.r;
+        uniforms.baseColor[1] = albedo.g;
+        uniforms.baseColor[2] = albedo.b;
+        uniforms.baseColor[3] = 1.0f;
 
         size_t offset = i * kUniformStride;
         memcpy(uniformContents + offset, &uniforms, sizeof(GeoUniforms));
@@ -938,6 +968,7 @@ void EncodeLightingPass(RendererState *renderer, id<MTLCommandBuffer> commandBuf
     [encoder setViewport:viewport];
     [encoder setFragmentTexture:renderer->gNormalTexture atIndex:1];
     [encoder setFragmentTexture:renderer->aoRawTexture atIndex:2];
+    [encoder setFragmentTexture:renderer->gAlbedoTexture atIndex:3];
     [encoder setFragmentBytes:&params length:sizeof(params) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
@@ -1118,9 +1149,14 @@ void RendererRender(RendererState *renderer, const RendererSceneView *view,
 
     MTLViewport fullViewport = {0.0, 0.0, (double)renderer->screenWidth,
                                (double)renderer->screenHeight, 0.0, 1.0};
-    MTLViewport contentViewport = {(double)renderer->contentOriginX, (double)renderer->contentOriginY,
-                                   (double)renderer->screenWidth, (double)renderer->screenHeight,
-                                   0.0, 1.0};
+    // Pixel-align the origin and overdraw the extent by a few pixels: the final
+    // composite must never leave a sub-pixel sliver between the viewport and a
+    // docked panel. The fullscreen triangle covers any extent; the extra rows
+    // land under the panels (or are clipped past the drawable edge).
+    MTLViewport contentViewport = {floor((double)renderer->contentOriginX),
+                                   floor((double)renderer->contentOriginY),
+                                   (double)renderer->screenWidth + 4.0,
+                                   (double)renderer->screenHeight + 4.0, 0.0, 1.0};
 
     EncodeGeometryPass(renderer, view, target.commandBuffer);
     if (aoEnabled) {

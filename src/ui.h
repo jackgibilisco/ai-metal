@@ -23,10 +23,21 @@ struct UiVertex {
     unsigned char rgba[4];
 };
 
-// App-owned values the demo controls edit, passed into UiBuildFrame by pointer.
-struct UiDemoState {
-    float speed;
-    float zoom;
+// Per-glyph placement for the proportional font atlas the UI renderer bakes
+// (ASCII 32..127). Lengths are in logical UI pixels; uv is into the atlas.
+struct UiGlyphMetric {
+    float u0, v0, u1, v1;
+    float advance;          // pen advance to the next glyph
+    float offsetX, offsetY; // quad top-left relative to the pen (offsetY from the baseline, +up)
+    float width, height;    // quad size (0 for whitespace)
+};
+
+struct UiFontMetrics {
+    UiGlyphMetric glyphs[96];
+    float ascent;    // baseline offset from the top of a text line
+    float descent;   // baseline to bottom of the line (positive)
+    float lineHeight; // ascent + descent + leading
+    float pixelSize;  // size the atlas was rasterized at
 };
 
 struct UiState;
@@ -34,11 +45,27 @@ struct UiState;
 UiState *UiInit(Arena *arena, float drawableWidth, float drawableHeight);
 void UiHandleResize(UiState *ui, float drawableWidth, float drawableHeight);
 
+// Global UI zoom (Cmd + / Cmd -). 1.0 is native; clamped to a sane range. The
+// layout is unchanged — only the on-screen size of every panel, control, and
+// glyph scales.
+void UiSetUiScale(UiState *ui, float scale);
+void UiAdjustUiScale(UiState *ui, float delta);
+float UiUiScale(const UiState *ui);
+
+// The UI renderer bakes the glyph atlas and owns these metrics; the app hands
+// the pointer in once at startup. It must outlive `ui`. Text layout falls back
+// to a fixed 8px cell until this is set.
+void UiSetFontMetrics(UiState *ui, const UiFontMetrics *metrics);
+
 // `menuContext` supplies the menu strip's Show-Menu-Bar preference (via
 // menuContext.menuState) and the fullscreen flag its command predicates read;
-// the UI never invokes commands, only reports which was clicked. `demo` is
-// app-owned state the sliders mutate.
-void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext, UiDemoState *demo);
+// the UI never invokes commands, only reports which was clicked.
+void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext);
+
+// The viewport marquee rectangle in drawable pixels, set by the app each frame
+// from its box-select drag state (two opposite corners; order-independent).
+// `active` false hides it.
+void UiSetMarquee(UiState *ui, bool active, float x0, float y0, float x1, float y1);
 
 // A command chosen in the in-app menu strip this frame, or Command_None.
 // Reading it clears it.
@@ -64,15 +91,12 @@ struct SceneState;
 struct AudioState;
 
 struct UiEditorState {
-    int *toolMode;    // scene-owned tool-mode enum; the tool buttons set it
-    bool *snapEnabled; // app-owned snap flag; the Snap button toggles it
-    void (*addSource)(void *context);
-    void (*addListener)(void *context);
-    void (*frameSelected)(void *context);
-    void *context;
+    int *toolMode;       // scene-owned tool-mode enum; the tool buttons set it
+    bool requestAddMenu; // app raises this for one frame (the 'n' key) to open
+                         // the outliner's add-kind dropdown
 
-    // Timeline panel bindings. Null until the scene/audio modules are wired;
-    // the panel then reads/draws the timeline and submits undoable edits.
+    // Scene + timeline bindings. Null until the modules are wired; the panels
+    // then read/draw them and submit undoable edits.
     TimelineState *timeline;
     SceneState *scene;
     AudioState *audio;

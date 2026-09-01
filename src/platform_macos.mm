@@ -68,6 +68,10 @@ constexpr int kMaxDropPathLength = 1024;
 @property(nonatomic) int pendingDropCount;
 @property(nonatomic) float pendingDropX; // backing pixels, top-left origin
 @property(nonatomic) float pendingDropY;
+@property(nonatomic) BOOL pendingDragHovering;
+@property(nonatomic) float pendingDragHoverX; // backing pixels, top-left origin
+@property(nonatomic) float pendingDragHoverY;
+@property(nonatomic) int pendingDragHoverCount;
 @property(nonatomic) BOOL inFullscreen; // kept in sync by AppDelegate
 @property(nonatomic, copy) void (^onToggleFullscreen)(void);
 - (int)drainKeyEventsInto:(KeyEvent *)dest max:(int)max;
@@ -136,10 +140,31 @@ constexpr int kMaxDropPathLength = 1024;
 }
 
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
-    return [self wavURLsFromDrag:sender].count > 0 ? NSDragOperationCopy : NSDragOperationNone;
+    return [self draggingUpdated:sender];
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+    int wavCount = (int)[self wavURLsFromDrag:sender].count;
+    if (wavCount == 0) {
+        self.pendingDragHovering = NO;
+        return NSDragOperationNone;
+    }
+    NSPoint inView = [self convertPoint:sender.draggingLocation fromView:nil];
+    NSPoint inBacking = [self convertPointToBacking:inView];
+    self.pendingDragHoverX = (float)inBacking.x;
+    self.pendingDragHoverY = (float)(self.drawableSize.height - inBacking.y);
+    self.pendingDragHoverCount = wavCount;
+    self.pendingDragHovering = YES;
+    return NSDragOperationCopy;
+}
+
+- (void)draggingExited:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    self.pendingDragHovering = NO;
 }
 
 - (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    self.pendingDragHovering = NO;
     NSArray<NSURL *> *wavs = [self wavURLsFromDrag:sender];
     int count = (int)wavs.count;
     if (count == 0) {
@@ -477,6 +502,10 @@ constexpr int kMaxDropPathLength = 1024;
     frameInput.droppedFileCount = metalView.pendingDropCount;
     frameInput.dropX = metalView.pendingDropX;
     frameInput.dropY = metalView.pendingDropY;
+    frameInput.dragHovering = (bool)metalView.pendingDragHovering;
+    frameInput.dragHoverX = metalView.pendingDragHoverX;
+    frameInput.dragHoverY = metalView.pendingDragHoverY;
+    frameInput.dragHoverFileCount = metalView.pendingDragHoverCount;
     metalView.pendingPanX = 0.0f;
     metalView.pendingPanY = 0.0f;
     metalView.pendingZoom = 0.0f;

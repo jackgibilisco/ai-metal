@@ -51,4 +51,12 @@ struct FrameInput {
     int droppedFileCount;
     float dropX; // drop point in backing pixels, top-left origin
     float dropY;
+
+    // A file drag currently held over the window, before any drop. Valid every
+    // frame the drag is inside; dragHovering is false otherwise. Lets the
+    // timeline draw a ghost of where a dropped clip would land.
+    bool dragHovering;
+    float dragHoverX; // backing pixels, top-left origin
+    float dragHoverY;
+    int dragHoverFileCount;
 };

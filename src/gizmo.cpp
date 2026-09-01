@@ -409,33 +409,73 @@ void GizmoBuild(GizmoMeshBuilder *out, ToolMode mode, Vec3 pivot, float scale,
     }
 }
 
+// Icons are camera-facing billboards. (u, v) are fractions of iconWorldSize in
+// the camera's right / up axes, roughly [-0.5, 0.5] around the entity origin.
+Vec3 BillboardPoint(Vec3 center, Vec3 right, Vec3 up, float size, float u, float v) {
+    Vec3 p = Vec3Add(center, Vec3Scale(right, u * size));
+    return Vec3Add(p, Vec3Scale(up, v * size));
+}
+
+void IconQuad(GizmoMeshBuilder *out, Vec3 c, Vec3 r, Vec3 u, float s, float u0, float v0, float u1,
+              float v1, const float color[4]) {
+    Vec3 a = BillboardPoint(c, r, u, s, u0, v0);
+    Vec3 b = BillboardPoint(c, r, u, s, u1, v0);
+    Vec3 d = BillboardPoint(c, r, u, s, u1, v1);
+    Vec3 e = BillboardPoint(c, r, u, s, u0, v1);
+    PushTri(out, a, b, d, color);
+    PushTri(out, a, d, e, color);
+}
+
+void IconArc(GizmoMeshBuilder *out, Vec3 c, Vec3 r, Vec3 u, float s, float cu, float cv,
+             float radius, float a0, float a1, int segments, const float color[4]) {
+    Vec3 prev =
+        BillboardPoint(c, r, u, s, cu + cosf(a0) * radius, cv + sinf(a0) * radius);
+    for (int i = 1; i <= segments; ++i) {
+        float a = a0 + (a1 - a0) * (float)i / (float)segments;
+        Vec3 cur = BillboardPoint(c, r, u, s, cu + cosf(a) * radius, cv + sinf(a) * radius);
+        PushLine(out, prev, cur, color);
+        prev = cur;
+    }
+}
+
 void GizmoBuildIcons(GizmoMeshBuilder *out, const IconInstance *icons, int count,
                      Vec3 cameraRight, Vec3 cameraUp, float iconWorldSize,
                      const IconColors &colors) {
-    float half = iconWorldSize * 0.5f;
-    Vec3 right = Vec3Scale(cameraRight, half);
-    Vec3 up = Vec3Scale(cameraUp, half);
-
     for (int i = 0; i < count; ++i) {
         const IconInstance &icon = icons[i];
         const float *fill = (icon.kind == 0)   ? colors.source
                             : (icon.kind == 2) ? colors.activeListener
                                                : colors.listener;
-
         Vec3 p = icon.position;
-        Vec3 bottomLeft = Vec3Sub(Vec3Sub(p, right), up);
-        Vec3 bottomRight = Vec3Sub(Vec3Add(p, right), up);
-        Vec3 topRight = Vec3Add(Vec3Add(p, right), up);
-        Vec3 topLeft = Vec3Add(Vec3Sub(p, right), up);
+        Vec3 r = cameraRight;
+        Vec3 u = cameraUp;
+        float s = iconWorldSize;
 
-        PushTri(out, bottomLeft, bottomRight, topRight, fill);
-        PushTri(out, bottomLeft, topRight, topLeft, fill);
+        if (icon.kind == 0) {
+            // Volume: rectangular body + cone opening to the right, two waves.
+            IconQuad(out, p, r, u, s, -0.34f, -0.12f, -0.16f, 0.12f, fill);
+            Vec3 coneTop = BillboardPoint(p, r, u, s, -0.16f, 0.30f);
+            Vec3 coneBottom = BillboardPoint(p, r, u, s, -0.16f, -0.30f);
+            Vec3 coneTip = BillboardPoint(p, r, u, s, 0.06f, 0.0f);
+            PushTri(out, coneBottom, coneTip, coneTop, fill);
+            IconArc(out, p, r, u, s, 0.06f, 0.0f, 0.20f, -0.9f, 0.9f, 6, fill);
+            IconArc(out, p, r, u, s, 0.06f, 0.0f, 0.34f, -0.8f, 0.8f, 7, fill);
+        } else {
+            // Headphones: headband arc + two ear cups.
+            IconArc(out, p, r, u, s, 0.0f, -0.06f, 0.34f, 0.30f, kPi - 0.30f, 12, fill);
+            IconQuad(out, p, r, u, s, -0.40f, -0.30f, -0.24f, 0.06f, fill);
+            IconQuad(out, p, r, u, s, 0.24f, -0.30f, 0.40f, 0.06f, fill);
+        }
 
         if (icon.selected) {
-            PushLine(out, bottomLeft, bottomRight, colors.selectedOutline);
-            PushLine(out, bottomRight, topRight, colors.selectedOutline);
-            PushLine(out, topRight, topLeft, colors.selectedOutline);
-            PushLine(out, topLeft, bottomLeft, colors.selectedOutline);
+            Vec3 bl = BillboardPoint(p, r, u, s, -0.5f, -0.5f);
+            Vec3 br = BillboardPoint(p, r, u, s, 0.5f, -0.5f);
+            Vec3 tr = BillboardPoint(p, r, u, s, 0.5f, 0.5f);
+            Vec3 tl = BillboardPoint(p, r, u, s, -0.5f, 0.5f);
+            PushLine(out, bl, br, colors.selectedOutline);
+            PushLine(out, br, tr, colors.selectedOutline);
+            PushLine(out, tr, tl, colors.selectedOutline);
+            PushLine(out, tl, bl, colors.selectedOutline);
             if (icon.kind == 0) {
                 BuildWireSphere(out, p, icon.minDistance, colors.distanceSphere);
                 BuildWireSphere(out, p, icon.maxDistance, colors.distanceSphere);

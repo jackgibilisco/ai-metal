@@ -20,12 +20,11 @@ struct AppState {
     RendererState *renderer;
     UiState *ui;
     UiRenderState *uiRender;
-    UiDemoState demo;
     MenuState menu;
     PlatformMenuHooks menuHooks;
-    bool snapEnabled;
     bool fullscreen; // tracked from the last FrameInput, for CommandContext
     int forcedRenderFrames; // FrameUpdate reports "needs render" while this is > 0
+    bool addMenuRequested;  // the 'n' key, handed to the outliner for one frame
 
     // Viewport interaction. FrameInput carries the mouse button as a level, so
     // the press/release edges are recovered from the previous frame's state.
@@ -38,6 +37,15 @@ struct AppState {
     bool boxSelecting;
     float boxAnchorX;
     float boxAnchorY;
+
+    // Camera-drag latch: once an orbit/pan drag starts in the viewport, keep
+    // feeding it even as the pointer crosses a panel. Plus a stale-hover guard
+    // so panel/toolbar highlights repaint once the pointer leaves them.
+    bool cameraButtonWasDown;
+    bool cameraDragActive;
+    bool uiHoverLastFrame;
+    float lastMouseX;
+    float lastMouseY;
 };
 
 // A drag shorter than this is a click on empty space, not a box select.
@@ -49,20 +57,6 @@ CommandContext AppStateContext(AppState *appState) {
 
 void InvokeCommand(AppState *appState, CommandId id) {
     CommandInvoke(id, AppStateContext(appState));
-    appState->forcedRenderFrames = 3;
-}
-
-void AppAddSource(void *context) {
-    AppState *appState = (AppState *)context;
-    Ray noRay = {};
-    ToolAddAudioSource(appState->scene, noRay, RendererCameraFocus(appState->renderer));
-    appState->forcedRenderFrames = 3;
-}
-
-void AppAddListener(void *context) {
-    AppState *appState = (AppState *)context;
-    Ray noRay = {};
-    ToolAddListener(appState->scene, noRay, RendererCameraFocus(appState->renderer));
     appState->forcedRenderFrames = 3;
 }
 
@@ -184,10 +178,10 @@ void UpdateViewportInteraction(AppState *appState, FrameInput input) {
     }
 
     // Clicking off the gizmo selects, in every tool mode — otherwise a
-    // transform tool with an empty selection would be a dead end. Only the
-    // Select tool starts a box drag.
+    // transform tool with an empty selection would be a dead end. A drag on
+    // empty space marquee-selects, also in every mode.
     bool hitEntity = SelectEntityAt(appState, ray, input.shift);
-    if (!hitEntity && toolMode == ToolMode_Select) {
+    if (!hitEntity) {
         appState->boxSelecting = true;
         appState->boxAnchorX = input.mouseX;
         appState->boxAnchorY = input.mouseY;
@@ -198,15 +192,12 @@ void UpdateViewportInteraction(AppState *appState, FrameInput input) {
 void PublishEditorState(AppState *appState) {
     UiEditorState editor = {};
     editor.toolMode = SceneToolModePtr(appState->scene);
-    editor.snapEnabled = &appState->snapEnabled;
-    editor.addSource = AppAddSource;
-    editor.addListener = AppAddListener;
-    editor.frameSelected = nullptr;
-    editor.context = appState;
+    editor.requestAddMenu = appState->addMenuRequested;
     editor.timeline = appState->timeline;
     editor.scene = appState->scene;
     editor.audio = appState->audio;
     UiSetEditorState(appState->ui, editor);
+    appState->addMenuRequested = false; // handed off; the outliner opened it this frame
 }
 
 } // namespace
@@ -221,7 +212,7 @@ void Init(Arena *arena, GpuContext *gpu, float drawableWidth, float drawableHeig
     appState->renderer = RendererInit(arena, gpu, drawableWidth, drawableHeight);
     appState->ui = UiInit(arena, drawableWidth, drawableHeight);
     appState->uiRender = UiRenderInit(arena, gpu);
-    appState->demo = {0.5f, 0.35f};
+    UiSetFontMetrics(appState->ui, UiRenderFontMetrics(appState->uiRender));
     appState->menuHooks = menuHooks;
 }
 
@@ -237,7 +228,9 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
                 TimelineTime(appState->timeline));
 
     PublishEditorState(appState);
-    UiBuildFrame(appState->ui, input, AppStateContext(appState), &appState->demo);
+    UiSetMarquee(appState->ui, appState->boxSelecting, appState->boxAnchorX, appState->boxAnchorY,
+                 input.mouseX, input.mouseY);
+    UiBuildFrame(appState->ui, input, AppStateContext(appState));
 
     CommandId clicked = UiTakeCommand(appState->ui);
     if (clicked != Command_None) {
@@ -257,14 +250,64 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
             appState->forcedRenderFrames = 3;
             continue;
         }
+
+        // Editor tool shortcuts. Handled here, not through the menu command
+        // table, because they act on scene state the table's CommandContext
+        // does not carry. Suppressed while a UI text field has the keyboard.
+        if (!UiWantsKeyboard(appState->ui)) {
+            int keyCode = input.keyEvents[i].keyCode;
+            bool handled = true;
+            if (key == '1') {
+                SceneSetToolMode(appState->scene, ToolMode_Translate);
+            } else if (key == '2') {
+                SceneSetToolMode(appState->scene, ToolMode_Rotate);
+            } else if (key == '3') {
+                SceneSetToolMode(appState->scene, ToolMode_Scale);
+            } else if (key == 127 || keyCode == 51 || keyCode == 117) { // Backspace / Fwd-Delete
+                SceneDeleteSelection(appState->scene);
+            } else if (key == 'n') {
+                appState->addMenuRequested = true; // outliner opens its add-kind dropdown
+            } else if ((key == '=' || key == '+') && (input.keyEvents[i].mods & ShortcutMod_Cmd)) {
+                UiAdjustUiScale(appState->ui, 0.1f);
+            } else if (key == '-' && (input.keyEvents[i].mods & ShortcutMod_Cmd)) {
+                UiAdjustUiScale(appState->ui, -0.1f);
+            } else if (key == '0' && (input.keyEvents[i].mods & ShortcutMod_Cmd)) {
+                UiSetUiScale(appState->ui, 1.0f);
+            } else if (key == 'z' && (input.keyEvents[i].mods & ShortcutMod_Cmd)) {
+                if (input.keyEvents[i].mods & ShortcutMod_Shift) {
+                    SceneRedo(appState->scene);
+                } else {
+                    SceneUndo(appState->scene);
+                }
+            } else {
+                handled = false;
+            }
+            if (handled) {
+                appState->forcedRenderFrames = 3;
+                continue;
+            }
+        }
+
         const Command *command = CommandForShortcut(key, input.keyEvents[i].mods);
         if (command != nullptr) {
             InvokeCommand(appState, command->id);
         }
     }
 
+    // Right/middle button drives orbit/pan. Once such a drag begins over the
+    // viewport, keep feeding the camera even as the pointer sweeps across a
+    // panel edge — otherwise the camera stutters on the border.
+    bool cameraButtonDown = input.mouseRightDown || input.mouseMiddleDown;
+    if (cameraButtonDown && !appState->cameraButtonWasDown && !UiWantsMouse(appState->ui)) {
+        appState->cameraDragActive = true;
+    }
+    if (!cameraButtonDown) {
+        appState->cameraDragActive = false;
+    }
+    appState->cameraButtonWasDown = cameraButtonDown;
+
     FrameInput cameraInput = input;
-    if (UiWantsMouse(appState->ui)) {
+    if (UiWantsMouse(appState->ui) && !appState->cameraDragActive) {
         cameraInput.panX = 0.0f;
         cameraInput.panY = 0.0f;
         cameraInput.zoomDelta = 0.0f;
@@ -274,11 +317,24 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     RendererUpdateCamera(appState->renderer, cameraInput);
     UpdateViewportInteraction(appState, input);
 
+    // A pointer move on or just off UI chrome needs one more frame so the
+    // panel/toolbar hover highlight repaints instead of freezing on-screen.
+    bool mouseMoved =
+        input.mouseX != appState->lastMouseX || input.mouseY != appState->lastMouseY;
+    appState->lastMouseX = input.mouseX;
+    appState->lastMouseY = input.mouseY;
+    bool uiHover = UiWantsMouse(appState->ui);
+    if (mouseMoved && (uiHover || appState->uiHoverLastFrame)) {
+        appState->forcedRenderFrames = 2;
+    }
+    appState->uiHoverLastFrame = uiHover;
+
     bool cameraMoved = cameraInput.panX != 0.0f || cameraInput.panY != 0.0f ||
                        cameraInput.zoomDelta != 0.0f || cameraInput.orbitYaw != 0.0f ||
                        cameraInput.orbitPitch != 0.0f;
     bool renderToggled = input.cycleDebugView || input.toggleFxaa;
-    bool uiInteracting = UiWantsMouse(appState->ui) || UiWantsKeyboard(appState->ui);
+    bool uiInteracting = UiWantsMouse(appState->ui) || UiWantsKeyboard(appState->ui) ||
+                         input.dragHovering;
 
     bool needsRender = sceneChanged || cameraMoved || renderToggled || uiInteracting || playing ||
                        appState->forcedRenderFrames > 0;

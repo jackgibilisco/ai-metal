@@ -38,15 +38,24 @@ void CopyName(char *dst, const char *src) {
 enum {
     SceneCmdTag_Create = 1,
     SceneCmdTag_Delete,
+    SceneCmdTag_MultiDelete,
     SceneCmdTag_SetTransform,
     SceneCmdTag_TransformSelection,
+    SceneCmdTag_Rename,
 };
 
 struct PayloadCreate {
     EntityKind kind;
     char name[64];
     Transform transform;
+    MeshId mesh; // honored only for EntityKind_Mesh; 0 (Cube) is the default
     EntityId result;
+};
+
+struct PayloadRename {
+    EntityId id;
+    char before[64];
+    char after[64];
 };
 
 struct PayloadDelete {
@@ -69,11 +78,20 @@ struct PayloadTransformSelection {
     uint32_t editCount;
 };
 
+// A multi-entity delete keeps its per-entity snapshots in a side ring (like
+// transform-selection edits), so one undo-ring slot covers the whole batch.
+struct PayloadMultiDelete {
+    uint32_t start;
+    uint32_t count;
+};
+
 union PayloadStorage {
     PayloadCreate create;
     PayloadDelete del;
+    PayloadMultiDelete multiDelete;
     PayloadSetTransform setTransform;
     PayloadTransformSelection transformSelection;
+    PayloadRename rename;
 };
 
 struct TransformEdit {
@@ -119,6 +137,10 @@ struct SceneState {
     // Side ring feeding multi-select transform undo.
     TransformEdit transformEdits[kMaxTransformEdits];
     uint32_t transformEditHead;
+
+    // Side ring feeding multi-entity delete undo (one command, N entities).
+    PayloadDelete deleteSnapshots[kMaxEntities];
+    uint32_t deleteSnapshotHead;
 
     // Gizmo drag snapshot.
     bool dragActive;
@@ -682,10 +704,35 @@ int SubmitTyped(SceneState *scene, int tag, void (*redo)(SceneState *, void *),
 void RedoCreate(SceneState *scene, void *raw) {
     PayloadCreate *p = (PayloadCreate *)raw;
     p->result = EntityAlloc(scene, p->kind, p->name, p->transform);
+    if (p->kind == EntityKind_Mesh && p->mesh != MeshId_Cube) {
+        const Entity *e = EntityConst(scene, p->result);
+        if (e != nullptr && e->component != kNoComponent) {
+            MeshRenderer &mesh = scene->meshRenderers[e->component];
+            mesh.mesh = p->mesh;
+            mesh.localAabbMin = Vec3{-1.0f, 0.0f, -1.0f}; // matches the built-in plane verts
+            mesh.localAabbMax = Vec3{1.0f, 0.0f, 1.0f};
+        }
+    }
 }
 void UndoCreate(SceneState *scene, void *raw) {
     PayloadCreate *p = (PayloadCreate *)raw;
     EntityDestroy(scene, p->result);
+}
+
+// --- rename ---
+void RedoRename(SceneState *scene, void *raw) {
+    PayloadRename *p = (PayloadRename *)raw;
+    Entity *entity = EntityMut(scene, p->id);
+    if (entity != nullptr) {
+        CopyName(entity->name, p->after);
+    }
+}
+void UndoRename(SceneState *scene, void *raw) {
+    PayloadRename *p = (PayloadRename *)raw;
+    Entity *entity = EntityMut(scene, p->id);
+    if (entity != nullptr) {
+        CopyName(entity->name, p->before);
+    }
 }
 
 // --- delete ---
@@ -715,6 +762,20 @@ void RedoDelete(SceneState *scene, void *raw) {
 void UndoDelete(SceneState *scene, void *raw) {
     PayloadDelete *p = (PayloadDelete *)raw;
     EntityRestore(scene, p);
+}
+
+// --- multi-delete (one command over a whole selection) ---
+void RedoMultiDelete(SceneState *scene, void *raw) {
+    PayloadMultiDelete *p = (PayloadMultiDelete *)raw;
+    for (uint32_t i = 0; i < p->count; ++i) {
+        EntityDestroy(scene, scene->deleteSnapshots[(p->start + i) % kMaxEntities].id);
+    }
+}
+void UndoMultiDelete(SceneState *scene, void *raw) {
+    PayloadMultiDelete *p = (PayloadMultiDelete *)raw;
+    for (uint32_t i = 0; i < p->count; ++i) {
+        EntityRestore(scene, &scene->deleteSnapshots[(p->start + i) % kMaxEntities]);
+    }
 }
 
 // --- set transform (single) ---
@@ -865,6 +926,30 @@ EntityId SceneCreateEntity(SceneState *scene, EntityKind kind, const char *name)
     return SceneCreateEntityAt(scene, kind, name, TransformIdentity());
 }
 
+EntityId SceneCreateMeshEntityAt(SceneState *scene, const char *name, MeshId mesh,
+                                 Transform transform) {
+    PayloadStorage payload = {};
+    payload.create.kind = EntityKind_Mesh;
+    CopyName(payload.create.name, name);
+    payload.create.transform = transform;
+    payload.create.mesh = mesh;
+    payload.create.result = kInvalidEntityId;
+    int slot = SubmitTyped(scene, SceneCmdTag_Create, RedoCreate, UndoCreate, payload);
+    return ((PayloadCreate *)scene->commands[slot].payload)->result;
+}
+
+void SceneRenameEntity(SceneState *scene, EntityId id, const char *name) {
+    const Entity *entity = EntityConst(scene, id);
+    if (entity == nullptr) {
+        return;
+    }
+    PayloadStorage payload = {};
+    payload.rename.id = id;
+    CopyName(payload.rename.before, entity->name);
+    CopyName(payload.rename.after, name);
+    SubmitTyped(scene, SceneCmdTag_Rename, RedoRename, UndoRename, payload);
+}
+
 void SceneDeleteEntity(SceneState *scene, EntityId id) {
     if (EntityConst(scene, id) == nullptr) {
         return;
@@ -884,6 +969,27 @@ void SceneSetEntityTransform(SceneState *scene, EntityId id, Transform next) {
     payload.setTransform.before = entity->transform;
     payload.setTransform.after = next;
     SubmitTyped(scene, SceneCmdTag_SetTransform, RedoSetTransform, UndoSetTransform, payload);
+}
+
+void SceneDeleteSelection(SceneState *scene) {
+    EntityId ids[kMaxEntities];
+    int count = GatherSelectedEntities(scene, ids, kMaxEntities);
+    if (count == 0) {
+        return;
+    }
+
+    uint32_t start = scene->deleteSnapshotHead;
+    for (int i = 0; i < count; ++i) {
+        SnapshotForDelete(scene, ids[i], &scene->deleteSnapshots[(start + (uint32_t)i) % kMaxEntities]);
+    }
+    scene->deleteSnapshotHead = (start + (uint32_t)count) % kMaxEntities;
+
+    PayloadStorage payload = {};
+    payload.multiDelete.start = start;
+    payload.multiDelete.count = (uint32_t)count;
+    SubmitTyped(scene, SceneCmdTag_MultiDelete, RedoMultiDelete, UndoMultiDelete, payload);
+
+    SceneSelectionClear(scene);
 }
 
 void SceneMakeTransformSelection(SceneState *scene, TransformDelta delta) {
@@ -1010,7 +1116,7 @@ void SceneSetMesh(SceneState *scene, EntityId id, MeshId mesh, Vec3 localAabbMin
 SceneState *SceneInit(Arena *arena) {
     SceneState *scene = ArenaPushStruct(arena, SceneState);
     scene->arena = arena;
-    scene->toolMode = ToolMode_Select;
+    scene->toolMode = ToolMode_Translate;
     scene->activeListener = kInvalidEntityId;
     scene->activeEntity = kInvalidEntityId;
 
@@ -1029,6 +1135,21 @@ bool SceneUpdate(SceneState *, float) { return false; }
 // ---------------------------------------------------------------------------
 // Iteration for renderer + audio
 // ---------------------------------------------------------------------------
+int SceneEntities(const SceneState *scene, SceneEntityRow *out, int maxOut) {
+    int n = 0;
+    for (int slot = 0; slot < kMaxEntities && n < maxOut; ++slot) {
+        if (!scene->entityInUse[slot]) {
+            continue;
+        }
+        const Entity &entity = scene->entities[slot];
+        out[n].id = entity.id;
+        out[n].name = entity.name;
+        out[n].kind = entity.kind;
+        ++n;
+    }
+    return n;
+}
+
 int SceneMeshRenderers(const SceneState *scene, SceneMeshView *out, int maxOut) {
     int n = scene->meshRendererCount < maxOut ? scene->meshRendererCount : maxOut;
     for (int i = 0; i < n; ++i) {

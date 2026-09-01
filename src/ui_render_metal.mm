@@ -2,12 +2,15 @@
 
 #include "gpu_metal.h"
 
+#import <CoreText/CoreText.h>
+
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
-#include "third_party/font8x8_basic.h"
+#include "third_party/argentum/argentum_sans_regular.h"
 
 namespace {
 
@@ -43,7 +46,7 @@ vertex UiVertexOut ui_vertex(UiVertexIn in [[stage_in]],
 
 fragment float4 ui_fragment(UiVertexOut in [[stage_in]],
                             texture2d<float> fontAtlas [[texture(0)]]) {
-    constexpr sampler glyphSampler(filter::nearest, address::clamp_to_edge);
+    constexpr sampler glyphSampler(filter::linear, address::clamp_to_edge);
     float4 color = in.color;
     if (in.mode > 0.5) {
         color.a *= fontAtlas.sample(glyphSampler, in.uv).r;
@@ -54,12 +57,10 @@ fragment float4 ui_fragment(UiVertexOut in [[stage_in]],
 
 constexpr int kMaxUiVertices = 65536;
 
-// Glyph atlas layout. ui.cpp mirrors kFontFirstChar / kFontCharCount to place
-// text quads; a glyph's cell is column (codepoint - kFontFirstChar) of an
-// kFontCharCount-wide, one-row grid of 8x8 cells.
 constexpr int kFontFirstChar = 32;
 constexpr int kFontCharCount = 96;
-constexpr int kGlyphSize = 8;
+constexpr float kFontPixelSize = 20.0f; // logical UI px the atlas is baked at
+constexpr int kGlyphPad = 2;            // transparent gutter between atlas cells
 
 } // namespace
 
@@ -67,24 +68,102 @@ struct UiRenderState {
     id<MTLRenderPipelineState> pipeline;
     id<MTLBuffer> vertexBuffer;
     id<MTLTexture> fontAtlas;
+    UiFontMetrics fontMetrics;
 };
 
 namespace {
 
-id<MTLTexture> BuildFontAtlas(id<MTLDevice> device) {
-    int atlasWidth = kFontCharCount * kGlyphSize;
-    int atlasHeight = kGlyphSize;
-    uint8_t *pixels = (uint8_t *)calloc((size_t)atlasWidth * atlasHeight, 1);
-    for (int glyph = 0; glyph < kFontCharCount; ++glyph) {
-        const unsigned char *rows = font8x8_basic[kFontFirstChar + glyph];
-        for (int row = 0; row < kGlyphSize; ++row) {
-            for (int col = 0; col < kGlyphSize; ++col) {
-                if (rows[row] & (1 << col)) {
-                    pixels[row * atlasWidth + glyph * kGlyphSize + col] = 255;
-                }
-            }
+// Rasterizes ASCII 32..127 of Argentum Sans (embedded) into a one-row R8 atlas
+// via CoreText and fills `out` with per-glyph placement. Falls back to the
+// system UI font if the embedded face fails to load.
+id<MTLTexture> BuildFontAtlas(id<MTLDevice> device, UiFontMetrics *out) {
+    CTFontRef font = nullptr;
+    CGDataProviderRef provider = CGDataProviderCreateWithData(
+        nullptr, argentum_sans_regular_ttf, argentum_sans_regular_ttf_len, nullptr);
+    if (provider != nullptr) {
+        CGFontRef cgFont = CGFontCreateWithDataProvider(provider);
+        CGDataProviderRelease(provider);
+        if (cgFont != nullptr) {
+            font = CTFontCreateWithGraphicsFont(cgFont, kFontPixelSize, nullptr, nullptr);
+            CGFontRelease(cgFont);
         }
     }
+    if (font == nullptr) {
+        font = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, kFontPixelSize, nullptr);
+    }
+
+    CGFloat ascent = CTFontGetAscent(font);
+    CGFloat descent = CTFontGetDescent(font);
+    CGFloat leading = CTFontGetLeading(font);
+    out->ascent = (float)ascent;
+    out->descent = (float)descent;
+    out->lineHeight = (float)ceil(ascent + descent + leading);
+    out->pixelSize = kFontPixelSize;
+
+    int atlasHeight = (int)ceil(ascent + descent) + kGlyphPad * 2;
+    CGGlyph glyphs[kFontCharCount] = {};
+    CGRect boundingRects[kFontCharCount] = {};
+    CGSize advances[kFontCharCount] = {};
+    int cellX[kFontCharCount] = {};
+    int cellW[kFontCharCount] = {};
+
+    int atlasWidth = kGlyphPad;
+    for (int i = 0; i < kFontCharCount; ++i) {
+        UniChar ch = (UniChar)(kFontFirstChar + i);
+        CTFontGetGlyphsForCharacters(font, &ch, &glyphs[i], 1);
+        CTFontGetBoundingRectsForGlyphs(font, kCTFontOrientationHorizontal, &glyphs[i],
+                                        &boundingRects[i], 1);
+        CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyphs[i], &advances[i], 1);
+        int w = (glyphs[i] == 0 || CGRectIsNull(boundingRects[i]) ||
+                 boundingRects[i].size.width <= 0.0)
+                    ? 0
+                    : (int)ceil(boundingRects[i].size.width) + 1;
+        cellW[i] = w;
+        cellX[i] = atlasWidth;
+        atlasWidth += w + kGlyphPad;
+    }
+
+    size_t bytesPerRow = (size_t)atlasWidth;
+    uint8_t *pixels = (uint8_t *)calloc(bytesPerRow * atlasHeight, 1);
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    CGContextRef ctx = CGBitmapContextCreate(pixels, atlasWidth, atlasHeight, 8, bytesPerRow, gray,
+                                             kCGImageAlphaNone);
+    CGColorSpaceRelease(gray);
+    CGContextSetShouldAntialias(ctx, true);
+    CGContextSetGrayFillColor(ctx, 1.0, 1.0);
+
+    // Baseline sits kGlyphPad above the descent gutter. The bitmap context
+    // rasterizes top-down here, so atlas row 0 is the top of the glyph cell.
+    CGFloat baseline = (CGFloat)kGlyphPad + descent;
+    for (int i = 0; i < kFontCharCount; ++i) {
+        UiGlyphMetric &g = out->glyphs[i];
+        g = {};
+        g.advance = (float)advances[i].width;
+        if (cellW[i] == 0) {
+            continue;
+        }
+        CGRect bbox = boundingRects[i];
+        CGPoint pos = CGPointMake((CGFloat)cellX[i] - bbox.origin.x, baseline);
+        CTFontDrawGlyphs(font, &glyphs[i], &pos, 1, ctx);
+
+        float w = (float)bbox.size.width;
+        float h = (float)bbox.size.height;
+        // CGBitmapContext draws bottom-up; the byte buffer is row 0 = top. So a
+        // CG y of `cy` lands in buffer row (atlasHeight - cy), which is the v
+        // texel row Metal samples.
+        float glyphBottomCG = (float)(baseline + bbox.origin.y);
+        float glyphTopCG = glyphBottomCG + h;
+        g.u0 = (float)cellX[i] / (float)atlasWidth;
+        g.u1 = ((float)cellX[i] + w) / (float)atlasWidth;
+        g.v0 = ((float)atlasHeight - glyphTopCG) / (float)atlasHeight;    // screen-top corner
+        g.v1 = ((float)atlasHeight - glyphBottomCG) / (float)atlasHeight; // screen-bottom corner
+        g.offsetX = (float)bbox.origin.x;
+        g.offsetY = (float)(bbox.origin.y + bbox.size.height); // baseline -> top of glyph
+        g.width = w;
+        g.height = h;
+    }
+    CGContextRelease(ctx);
+    CFRelease(font);
 
     MTLTextureDescriptor *descriptor =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
@@ -96,7 +175,7 @@ id<MTLTexture> BuildFontAtlas(id<MTLDevice> device) {
     [atlas replaceRegion:MTLRegionMake2D(0, 0, atlasWidth, atlasHeight)
              mipmapLevel:0
                withBytes:pixels
-             bytesPerRow:atlasWidth];
+             bytesPerRow:bytesPerRow];
     free(pixels);
     return atlas;
 }
@@ -154,8 +233,12 @@ UiRenderState *UiRenderInit(Arena *arena, GpuContext *gpu) {
 
     state->vertexBuffer = [device newBufferWithLength:kMaxUiVertices * sizeof(UiVertex)
                                              options:MTLResourceStorageModeShared];
-    state->fontAtlas = BuildFontAtlas(device);
+    state->fontAtlas = BuildFontAtlas(device, &state->fontMetrics);
     return state;
+}
+
+const UiFontMetrics *UiRenderFontMetrics(const UiRenderState *uiRender) {
+    return &uiRender->fontMetrics;
 }
 
 void UiRenderEncode(UiRenderState *uiRender, RenderTarget *targetPtr, const UiVertex *vertices,

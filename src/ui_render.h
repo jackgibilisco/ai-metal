@@ -14,3 +14,7 @@ struct UiRenderState;
 UiRenderState *UiRenderInit(Arena *arena, GpuContext *gpu);
 void UiRenderEncode(UiRenderState *uiRender, RenderTarget *target, const UiVertex *vertices,
                     int vertexCount, float drawableWidth, float drawableHeight);
+
+// Metrics for the baked glyph atlas, for ui.cpp's text layout. Owned by the
+// UiRenderState (arena-lived).
+const UiFontMetrics *UiRenderFontMetrics(const UiRenderState *uiRender);
