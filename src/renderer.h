@@ -8,6 +8,7 @@
 
 #include "arena.h"
 #include "frame_input.h"
+#include "gizmo.h"
 #include "gpu.h"
 #include "scene.h"
 
@@ -39,5 +40,31 @@ void RendererUpdateCamera(RendererState *renderer, FrameInput input);
 // The orbit camera's focus point (world space) — where new entities drop when
 // the placement ray has no better hit.
 Vec3 RendererCameraFocus(const RendererState *renderer);
-void RendererRender(RendererState *renderer, const SceneState *scene, RenderTarget *target);
+
+// Viewport ray under a drawable-pixel point with a TOP-LEFT origin (the space
+// FrameInput.mouseX/mouseY are already in). The point is mapped through the
+// content rect, so panel chrome does not shift the ray. Origin is the camera
+// eye; dir is normalized.
+Ray RendererScreenPointToRay(const RendererState *renderer, float screenX, float screenY);
+
+// Current view-projection, for box-select's NDC frustum test.
+Mat4 RendererViewProjection(const RendererState *renderer);
+
+// GizmoWorldScale for `pivot` against the live camera and content viewport.
+// Hit-testing and drawing both go through this so the picked handle is always
+// the drawn one.
+float RendererGizmoScale(const RendererState *renderer, Vec3 pivot);
+
+// What the renderer needs beyond the scene itself to draw one frame: the
+// gizmo overlay state the app tracks across frames.
+struct RendererSceneView {
+    const SceneState *scene;
+    ToolMode toolMode;
+    bool gizmoVisible;
+    Vec3 gizmoPivot;
+    GizmoHandle hoveredHandle;
+    GizmoHandle activeHandle;
+};
+
+void RendererRender(RendererState *renderer, const RendererSceneView *view, RenderTarget *target);
 RendererPassTimings RendererLastFrameTimings(const RendererState *renderer);

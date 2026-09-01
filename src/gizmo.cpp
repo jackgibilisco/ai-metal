@@ -208,12 +208,9 @@ Vec3 GroundOrFallback(Ray cursorRay, Vec3 fallback) {
 }
 
 EntityId CreateEntityAt(SceneState *scene, EntityKind kind, const char *name, Vec3 position) {
-    EntityId id = SceneCreateEntity(scene, kind, name);
-    if (!EntityIdValid(id)) return id;
     Transform transform = TransformIdentity();
     transform.position = position;
-    SceneSetEntityTransform(scene, id, transform);
-    return id;
+    return SceneCreateEntityAt(scene, kind, name, transform);
 }
 
 } // namespace

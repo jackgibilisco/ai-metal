@@ -170,6 +170,11 @@ bool SceneCanRedo(const SceneState *scene);
 // ---------------------------------------------------------------------------
 // Payloads come from a fixed scene-owned pool, not unbounded arena pushes.
 EntityId SceneCreateEntity(SceneState *scene, EntityKind kind, const char *name);
+
+// Create already positioned, as ONE undo step. Creating then transforming
+// would push two commands, so tool placement goes through this.
+EntityId SceneCreateEntityAt(SceneState *scene, EntityKind kind, const char *name,
+                             Transform transform);
 void SceneDeleteEntity(SceneState *scene, EntityId id);
 void SceneSetEntityTransform(SceneState *scene, EntityId id, Transform next);
 
@@ -274,6 +279,15 @@ struct SceneAudioSourceView {
     AudioSourceParams params;
 };
 int SceneAudioSources(const SceneState *scene, SceneAudioSourceView *out, int maxOut);
+
+// Every listener, not just the active one — the renderer draws an icon per
+// listener and tints the active one differently.
+struct SceneAudioListenerView {
+    EntityId entity;
+    Vec3 worldPos;
+    bool active;
+};
+int SceneAudioListeners(const SceneState *scene, SceneAudioListenerView *out, int maxOut);
 
 // Active listener (multiple allowed, exactly one active — decision 11).
 // Returns false and leaves the out params untouched when there is none.

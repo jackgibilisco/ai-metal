@@ -45,6 +45,7 @@ enum {
 struct PayloadCreate {
     EntityKind kind;
     char name[64];
+    Transform transform;
     EntityId result;
 };
 
@@ -680,7 +681,7 @@ int SubmitTyped(SceneState *scene, int tag, void (*redo)(SceneState *, void *),
 // --- create ---
 void RedoCreate(SceneState *scene, void *raw) {
     PayloadCreate *p = (PayloadCreate *)raw;
-    p->result = EntityAlloc(scene, p->kind, p->name, TransformIdentity());
+    p->result = EntityAlloc(scene, p->kind, p->name, p->transform);
 }
 void UndoCreate(SceneState *scene, void *raw) {
     PayloadCreate *p = (PayloadCreate *)raw;
@@ -849,13 +850,19 @@ bool SceneCanRedo(const SceneState *scene) { return scene->commandCursor < scene
 // ---------------------------------------------------------------------------
 // Typed operations
 // ---------------------------------------------------------------------------
-EntityId SceneCreateEntity(SceneState *scene, EntityKind kind, const char *name) {
+EntityId SceneCreateEntityAt(SceneState *scene, EntityKind kind, const char *name,
+                             Transform transform) {
     PayloadStorage payload = {};
     payload.create.kind = kind;
     CopyName(payload.create.name, name);
+    payload.create.transform = transform;
     payload.create.result = kInvalidEntityId;
     int slot = SubmitTyped(scene, SceneCmdTag_Create, RedoCreate, UndoCreate, payload);
     return ((PayloadCreate *)scene->commands[slot].payload)->result;
+}
+
+EntityId SceneCreateEntity(SceneState *scene, EntityKind kind, const char *name) {
+    return SceneCreateEntityAt(scene, kind, name, TransformIdentity());
 }
 
 void SceneDeleteEntity(SceneState *scene, EntityId id) {
@@ -1044,6 +1051,18 @@ int SceneAudioSources(const SceneState *scene, SceneAudioSourceView *out, int ma
         out[i].entity = source.entity;
         out[i].worldPos = entity != nullptr ? entity->transform.position : Vec3{0.0f, 0.0f, 0.0f};
         out[i].params = source.params;
+    }
+    return n;
+}
+
+int SceneAudioListeners(const SceneState *scene, SceneAudioListenerView *out, int maxOut) {
+    int n = scene->audioListenerCount < maxOut ? scene->audioListenerCount : maxOut;
+    for (int i = 0; i < n; ++i) {
+        const AudioListener &listener = scene->audioListeners[i];
+        const Entity *entity = EntityConst(scene, listener.entity);
+        out[i].entity = listener.entity;
+        out[i].worldPos = entity != nullptr ? entity->transform.position : Vec3{0.0f, 0.0f, 0.0f};
+        out[i].active = listener.entity == scene->activeListener;
     }
     return n;
 }

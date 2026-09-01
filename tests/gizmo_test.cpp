@@ -21,11 +21,15 @@ static EntityId g_activeListener = 0;
 static int g_createCount = 0;
 static int g_setTransformCount = 0;
 
-EntityId SceneCreateEntity(SceneState *, EntityKind kind, const char *) {
+EntityId SceneCreateEntityAt(SceneState *, EntityKind kind, const char *, Transform transform) {
     g_lastCreated = g_nextEntityId++;
     g_lastKind = kind;
+    g_lastTransform = transform;
     ++g_createCount;
     return g_lastCreated;
+}
+EntityId SceneCreateEntity(SceneState *scene, EntityKind kind, const char *name) {
+    return SceneCreateEntityAt(scene, kind, name, TransformIdentity());
 }
 void SceneSetEntityTransform(SceneState *, EntityId, Transform next) {
     g_lastTransform = next;
@@ -278,7 +282,8 @@ static void TestToolAddAudioSource() {
     CHECK(EntityIdValid(id));
     CHECK(g_lastKind == EntityKind_AudioSource);
     CHECK(g_createCount == 1);
-    CHECK(g_setTransformCount == 1);
+    // Placement rides on the create command, so there is exactly one undo step.
+    CHECK(g_setTransformCount == 0);
     CHECK_NEAR(g_lastTransform.position.x, 3.0f, 1e-3f);
     CHECK_NEAR(g_lastTransform.position.y, 0.0f, 1e-3f);
     CHECK_NEAR(g_lastTransform.position.z, -2.0f, 1e-3f);

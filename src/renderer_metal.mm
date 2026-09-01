@@ -1,6 +1,7 @@
 #include "renderer.h"
 
 #include "gpu_metal.h"
+#include "theme.h"
 
 #include <cstddef>
 #include <cstdlib>
@@ -12,6 +13,18 @@ struct MeshVertex {
     float position[3];
     float normal[3];
 };
+
+constexpr float kFovYRadians = 60.0f * (float)M_PI / 180.0f;
+
+// On-screen size the gizmo arms and the entity icons hold as the camera
+// dollies, in content-viewport pixels.
+constexpr float kGizmoPixelSize = 80.0f;
+constexpr float kIconPixelSize = 26.0f;
+
+// Per-frame overlay geometry (gizmo + icons). Sized for the worst realistic
+// frame; GizmoMeshBuilder clamps rather than overruns.
+constexpr int kMaxOverlayLineVertices = 32768;
+constexpr int kMaxOverlayTriVertices = 16384;
 
 // One 256-byte-aligned slot per object in the uniform buffer (256 is
 // Metal's minimum constant buffer offset alignment on macOS).
@@ -246,7 +259,7 @@ fragment float4 lighting_fragment(FullscreenOut in [[stage_in]],
     ao /= 16.0;
 
     if (normalSample.w >= 0.5) {
-        return float4(0.05, 0.05, 0.08, 1.0);
+        return float4(kThemeViewportBackground, 1.0);
     }
     if (debugMode == 1) {
         return float4(ao, ao, ao, 1.0);
@@ -256,7 +269,7 @@ fragment float4 lighting_fragment(FullscreenOut in [[stage_in]],
     float3 lightDirection = normalize(params.lightDirectionView.xyz);
     float diffuse = max(dot(normal, lightDirection), 0.0);
     float ambientOcclusion = (debugMode == 2) ? 1.0 : ao;
-    float3 baseColor = float3(0.25, 0.55, 0.95);
+    float3 baseColor = kThemeMeshBase;
     float3 color = baseColor * (0.35 * ambientOcclusion + 0.65 * diffuse);
     return float4(color, 1.0);
 }
@@ -306,7 +319,44 @@ fragment float4 fxaa_fragment(FullscreenOut in [[stage_in]],
     }
     return float4(rgbOuter, 1.0);
 }
+
+struct OverlayIn {
+    float3 position [[attribute(0)]];
+    float4 color [[attribute(1)]];
+};
+
+struct OverlayOut {
+    float4 position [[position]];
+    float4 color;
+};
+
+vertex OverlayOut overlay_vertex(OverlayIn in [[stage_in]],
+                                 constant float4x4 &viewProjection [[buffer(1)]]) {
+    OverlayOut out;
+    out.position = viewProjection * float4(in.position, 1.0);
+    out.color = in.color;
+    return out;
+}
+
+fragment float4 overlay_fragment(OverlayOut in [[stage_in]]) {
+    return in.color;
+}
 )";
+
+// theme.h owns every colour; the two the shader needs are injected as
+// `constant` definitions ahead of the source above rather than duplicated
+// as literals inside it.
+NSString *BuildShaderSource() {
+    theme::Rgba background = theme::ToFloat(theme::ViewportBackground);
+    theme::Rgba meshBase = theme::ToFloat(theme::MeshBase);
+    return [NSString stringWithFormat:@"#include <metal_stdlib>\n"
+                                       "using namespace metal;\n"
+                                       "constant float3 kThemeViewportBackground = float3(%f, %f, %f);\n"
+                                       "constant float3 kThemeMeshBase = float3(%f, %f, %f);\n"
+                                       "%s",
+                                      background.r, background.g, background.b, meshBase.r,
+                                      meshBase.g, meshBase.b, kShaderSource];
+}
 
 float Clamp(float value, float minValue, float maxValue) {
     if (value < minValue) return minValue;
@@ -318,19 +368,32 @@ float RandomUnit() {
     return (float)rand() / (float)RAND_MAX;
 }
 
-// eye = target + distance * sphericalDirection(yaw, pitch), looking at
-// target with world-up (0, 1, 0). yaw is measured from +Z toward +X.
-Mat4 OrbitCameraViewMatrix(Vec3 target, float distance, float yaw, float pitch) {
+// eye = target + distance * sphericalDirection(yaw, pitch). yaw is measured
+// from +Z toward +X.
+Vec3 OrbitCameraEye(Vec3 target, float distance, float yaw, float pitch) {
     Vec3 direction = {
         cosf(pitch) * sinf(yaw),
         sinf(pitch),
         cosf(pitch) * cosf(yaw),
     };
-    Vec3 eye = {
-        target.x + distance * direction.x,
-        target.y + distance * direction.y,
-        target.z + distance * direction.z,
+    return Vec3Add(target, Vec3Scale(direction, distance));
+}
+
+// Screen-space right/up axes of the orbit camera, derived algebraically from
+// yaw/pitch rather than from a second Mat4LookAt.
+Vec3 OrbitCameraRight(float yaw) { return Vec3{cosf(yaw), 0.0f, -sinf(yaw)}; }
+
+Vec3 OrbitCameraUp(float yaw, float pitch) {
+    return Vec3{
+        -sinf(pitch) * sinf(yaw),
+        cosf(pitch),
+        -sinf(pitch) * cosf(yaw),
     };
+}
+
+// Looks at target with world-up (0, 1, 0).
+Mat4 OrbitCameraViewMatrix(Vec3 target, float distance, float yaw, float pitch) {
+    Vec3 eye = OrbitCameraEye(target, distance, yaw, pitch);
     Vec3 up = {0.0f, 1.0f, 0.0f};
     return Mat4LookAt(eye, target, up);
 }
@@ -363,7 +426,11 @@ struct RendererState {
     id<MTLRenderPipelineState> aoPipeline;
     id<MTLRenderPipelineState> lightingPipeline;
     id<MTLRenderPipelineState> fxaaPipeline;
+    id<MTLRenderPipelineState> overlayPipeline;
     id<MTLDepthStencilState> depthState;
+
+    id<MTLBuffer> overlayLineBuffer;
+    id<MTLBuffer> overlayTriBuffer;
 
     id<MTLBuffer> cubeVertexBuffer;
     id<MTLBuffer> cubeIndexBuffer;
@@ -382,6 +449,8 @@ struct RendererState {
     uint32_t aoHeight;
     float contentOriginX;
     float contentOriginY;
+    float contentWidth;
+    float contentHeight;
 
     id<MTLCounterSampleBuffer> timestampSampleBuffer;
     bool timingSupported;
@@ -574,8 +643,15 @@ RendererState *RendererInit(Arena *arena, GpuContext *gpu, float drawableWidth,
     state->uniformBuffer = [device newBufferWithLength:kUniformStride * kMaxMeshRenderers
                                                 options:MTLResourceStorageModeShared];
 
+    state->overlayLineBuffer =
+        [device newBufferWithLength:sizeof(GizmoVertex) * kMaxOverlayLineVertices
+                            options:MTLResourceStorageModeShared];
+    state->overlayTriBuffer =
+        [device newBufferWithLength:sizeof(GizmoVertex) * kMaxOverlayTriVertices
+                            options:MTLResourceStorageModeShared];
+
     NSError *error = nil;
-    id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:kShaderSource]
+    id<MTLLibrary> library = [device newLibraryWithSource:BuildShaderSource()
                                                    options:nil
                                                      error:&error];
     if (library == nil) {
@@ -611,6 +687,36 @@ RendererState *RendererInit(Arena *arena, GpuContext *gpu, float drawableWidth,
     state->lightingPipeline = MakeFullscreenPipeline(device, library, @"lighting_fragment", colorFormat);
     state->fxaaPipeline = MakeFullscreenPipeline(device, library, @"fxaa_fragment", colorFormat);
 
+    MTLVertexDescriptor *overlayVertexDescriptor = [[MTLVertexDescriptor alloc] init];
+    overlayVertexDescriptor.attributes[0].format = MTLVertexFormatFloat3;
+    overlayVertexDescriptor.attributes[0].offset = offsetof(GizmoVertex, pos);
+    overlayVertexDescriptor.attributes[0].bufferIndex = 0;
+    overlayVertexDescriptor.attributes[1].format = MTLVertexFormatFloat4;
+    overlayVertexDescriptor.attributes[1].offset = offsetof(GizmoVertex, rgba);
+    overlayVertexDescriptor.attributes[1].bufferIndex = 0;
+    overlayVertexDescriptor.layouts[0].stride = sizeof(GizmoVertex);
+
+    MTLRenderPipelineDescriptor *overlayDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    overlayDescriptor.vertexFunction = [library newFunctionWithName:@"overlay_vertex"];
+    overlayDescriptor.fragmentFunction = [library newFunctionWithName:@"overlay_fragment"];
+    overlayDescriptor.vertexDescriptor = overlayVertexDescriptor;
+    overlayDescriptor.colorAttachments[0].pixelFormat = colorFormat;
+    overlayDescriptor.colorAttachments[0].blendingEnabled = YES;
+    overlayDescriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    overlayDescriptor.colorAttachments[0].destinationRGBBlendFactor =
+        MTLBlendFactorOneMinusSourceAlpha;
+    overlayDescriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    overlayDescriptor.colorAttachments[0].destinationAlphaBlendFactor =
+        MTLBlendFactorOneMinusSourceAlpha;
+
+    NSError *overlayError = nil;
+    state->overlayPipeline =
+        [device newRenderPipelineStateWithDescriptor:overlayDescriptor error:&overlayError];
+    if (state->overlayPipeline == nil) {
+        NSLog(@"Failed to create overlay pipeline: %@", overlayError);
+        abort();
+    }
+
     MTLDepthStencilDescriptor *depthDescriptor = [[MTLDepthStencilDescriptor alloc] init];
     depthDescriptor.depthCompareFunction = MTLCompareFunctionLess;
     depthDescriptor.depthWriteEnabled = YES;
@@ -645,10 +751,11 @@ void RendererSetContentRect(RendererState *renderer, float originX, float origin
     }
     renderer->contentOriginX = originX;
     renderer->contentOriginY = originY;
+    renderer->contentWidth = width;
+    renderer->contentHeight = height;
 
     float aspectRatio = width / height;
-    renderer->projection =
-        Mat4Perspective(60.0f * (float)M_PI / 180.0f, aspectRatio, 0.1f, 100.0f);
+    renderer->projection = Mat4Perspective(kFovYRadians, aspectRatio, 0.1f, 100.0f);
     renderer->view = OrbitCameraViewMatrix(renderer->cameraTarget, renderer->cameraDistance,
                                             renderer->cameraYaw, renderer->cameraPitch);
     renderer->viewProjection = Mat4Multiply(renderer->projection, renderer->view);
@@ -670,15 +777,8 @@ void RendererUpdateCamera(RendererState *renderer, FrameInput input) {
     renderer->cameraDistance =
         Clamp(renderer->cameraDistance * (1.0f - input.zoomDelta), kMinCameraDistance, kMaxCameraDistance);
 
-    // Screen-space right/up axes of the current orbit camera, derived
-    // algebraically from yaw/pitch rather than re-deriving them from a
-    // second Mat4LookAt call.
-    Vec3 right = {cosf(renderer->cameraYaw), 0.0f, -sinf(renderer->cameraYaw)};
-    Vec3 up = {
-        -sinf(renderer->cameraPitch) * sinf(renderer->cameraYaw),
-        cosf(renderer->cameraPitch),
-        -sinf(renderer->cameraPitch) * cosf(renderer->cameraYaw),
-    };
+    Vec3 right = OrbitCameraRight(renderer->cameraYaw);
+    Vec3 up = OrbitCameraUp(renderer->cameraYaw, renderer->cameraPitch);
 
     float panScale = kPanSensitivity * renderer->cameraDistance;
     renderer->cameraTarget.x += (-right.x * input.panX + up.x * input.panY) * panScale;
@@ -694,14 +794,48 @@ Vec3 RendererCameraFocus(const RendererState *renderer) {
     return renderer->cameraTarget;
 }
 
+Mat4 RendererViewProjection(const RendererState *renderer) {
+    return renderer->viewProjection;
+}
+
+float RendererGizmoScale(const RendererState *renderer, Vec3 pivot) {
+    Vec3 eye = OrbitCameraEye(renderer->cameraTarget, renderer->cameraDistance, renderer->cameraYaw,
+                              renderer->cameraPitch);
+    return GizmoWorldScale(pivot, eye, kFovYRadians, renderer->contentHeight, kGizmoPixelSize);
+}
+
+Ray RendererScreenPointToRay(const RendererState *renderer, float screenX, float screenY) {
+    Vec3 eye = OrbitCameraEye(renderer->cameraTarget, renderer->cameraDistance, renderer->cameraYaw,
+                              renderer->cameraPitch);
+
+    float viewportX = screenX - renderer->contentOriginX;
+    float viewportY = screenY - renderer->contentOriginY;
+    float ndcX = 2.0f * viewportX / renderer->contentWidth - 1.0f;
+    float ndcY = 1.0f - 2.0f * viewportY / renderer->contentHeight;
+
+    // Metal clip space is z in [0, 1]; unproject the near and far points of
+    // this pixel's line and use the segment between them as the direction.
+    Mat4 inverseViewProjection = Mat4Inverse(renderer->viewProjection);
+    Vec3 nearPoint = Mat4TransformPoint(inverseViewProjection, Vec3{ndcX, ndcY, 0.0f});
+    Vec3 farPoint = Mat4TransformPoint(inverseViewProjection, Vec3{ndcX, ndcY, 1.0f});
+
+    Ray ray;
+    ray.origin = eye;
+    ray.dir = Vec3Normalize(Vec3Sub(farPoint, nearPoint));
+    return ray;
+}
+
 namespace {
 
-void EncodeGeometryPass(RendererState *renderer, const SceneState *scene, id<MTLCommandBuffer> commandBuffer) {
+void EncodeGeometryPass(RendererState *renderer, const RendererSceneView *view,
+                        id<MTLCommandBuffer> commandBuffer) {
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = renderer->gNormalTexture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     // w = 1.0 marks "background"; real geometry writes its negative view-space Z.
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    theme::Rgba gBufferClear = theme::ToFloat(theme::GBufferClear);
+    pass.colorAttachments[0].clearColor =
+        MTLClearColorMake(gBufferClear.r, gBufferClear.g, gBufferClear.b, 1.0);
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     pass.depthAttachment.texture = renderer->sceneDepthTexture;
     pass.depthAttachment.loadAction = MTLLoadActionClear;
@@ -717,7 +851,7 @@ void EncodeGeometryPass(RendererState *renderer, const SceneState *scene, id<MTL
     [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
 
     static SceneMeshView meshViews[kMaxMeshRenderers];
-    int meshCount = SceneMeshRenderers(scene, meshViews, kMaxMeshRenderers);
+    int meshCount = SceneMeshRenderers(view->scene, meshViews, kMaxMeshRenderers);
 
     uint8_t *uniformContents = (uint8_t *)[renderer->uniformBuffer contents];
     for (int i = 0; i < meshCount; ++i) {
@@ -830,6 +964,127 @@ void EncodeFxaaPass(RendererState *renderer, id<MTLCommandBuffer> commandBuffer,
     [encoder endEncoding];
 }
 
+void CopyThemeColor(float *out, theme::Color color) {
+    theme::Rgba rgba = theme::ToFloat(color);
+    out[0] = rgba.r;
+    out[1] = rgba.g;
+    out[2] = rgba.b;
+    out[3] = rgba.a;
+}
+
+bool EntitySelected(const SceneState *scene, EntityId entity) {
+    return SceneSelectionContains(scene, SelectionItem{SelectionKind_Entity, (uint32_t)entity});
+}
+
+// Fills the two shared overlay buffers with this frame's gizmo handles and
+// entity icons. Every colour comes from theme.h.
+void BuildOverlayGeometry(RendererState *renderer, const RendererSceneView *view, int *outLineCount,
+                          int *outTriCount) {
+    GizmoMeshBuilder builder = {};
+    builder.lines = (GizmoVertex *)[renderer->overlayLineBuffer contents];
+    builder.lineCapacity = kMaxOverlayLineVertices;
+    builder.tris = (GizmoVertex *)[renderer->overlayTriBuffer contents];
+    builder.triCapacity = kMaxOverlayTriVertices;
+
+    static IconInstance icons[kMaxAudioSources + kMaxAudioListeners];
+    int iconCount = 0;
+
+    static SceneAudioSourceView sources[kMaxAudioSources];
+    int sourceCount = SceneAudioSources(view->scene, sources, kMaxAudioSources);
+    for (int i = 0; i < sourceCount; ++i) {
+        icons[iconCount].position = sources[i].worldPos;
+        icons[iconCount].kind = 0;
+        icons[iconCount].selected = EntitySelected(view->scene, sources[i].entity);
+        icons[iconCount].minDistance = sources[i].params.minDist;
+        icons[iconCount].maxDistance = sources[i].params.maxDist;
+        iconCount++;
+    }
+
+    static SceneAudioListenerView listeners[kMaxAudioListeners];
+    int listenerCount = SceneAudioListeners(view->scene, listeners, kMaxAudioListeners);
+    for (int i = 0; i < listenerCount; ++i) {
+        icons[iconCount].position = listeners[i].worldPos;
+        icons[iconCount].kind = listeners[i].active ? 2 : 1;
+        icons[iconCount].selected = EntitySelected(view->scene, listeners[i].entity);
+        icons[iconCount].minDistance = 0.0f;
+        icons[iconCount].maxDistance = 0.0f;
+        iconCount++;
+    }
+
+    IconColors iconColors;
+    CopyThemeColor(iconColors.source, theme::AudioSourceIcon);
+    CopyThemeColor(iconColors.listener, theme::ListenerIcon);
+    CopyThemeColor(iconColors.activeListener, theme::ListenerActive);
+    CopyThemeColor(iconColors.selectedOutline, theme::SelectionOutline);
+    CopyThemeColor(iconColors.distanceSphere, theme::AudioDistanceSphere);
+
+    Vec3 eye = OrbitCameraEye(renderer->cameraTarget, renderer->cameraDistance, renderer->cameraYaw,
+                              renderer->cameraPitch);
+    Vec3 right = OrbitCameraRight(renderer->cameraYaw);
+    Vec3 up = OrbitCameraUp(renderer->cameraYaw, renderer->cameraPitch);
+
+    // One call per icon: the billboard size is distance-dependent, so each
+    // icon needs its own world size to hold a constant size on screen.
+    for (int i = 0; i < iconCount; ++i) {
+        float iconWorldSize = GizmoWorldScale(icons[i].position, eye, kFovYRadians,
+                                              renderer->contentHeight, kIconPixelSize);
+        GizmoBuildIcons(&builder, &icons[i], 1, right, up, iconWorldSize, iconColors);
+    }
+
+    if (view->gizmoVisible) {
+        GizmoColors gizmoColors;
+        CopyThemeColor(gizmoColors.axisX, theme::GizmoAxisX);
+        CopyThemeColor(gizmoColors.axisY, theme::GizmoAxisY);
+        CopyThemeColor(gizmoColors.axisZ, theme::GizmoAxisZ);
+        CopyThemeColor(gizmoColors.highlight, theme::GizmoActive);
+        CopyThemeColor(gizmoColors.uniform, theme::SelectionOutline);
+
+        GizmoHandle highlighted =
+            view->activeHandle != GizmoHandle::None ? view->activeHandle : view->hoveredHandle;
+        GizmoBuild(&builder, view->toolMode, view->gizmoPivot,
+                   RendererGizmoScale(renderer, view->gizmoPivot), highlighted, gizmoColors);
+    }
+
+    *outLineCount = builder.lineCount;
+    *outTriCount = builder.triCount;
+}
+
+// Unlit, alpha-blended, no depth test: the gizmo and icons always read on top
+// of the lit scene, which is what an editor overlay wants.
+void EncodeOverlayPass(RendererState *renderer, const RendererSceneView *view,
+                       id<MTLCommandBuffer> commandBuffer, id<MTLTexture> destination,
+                       MTLViewport viewport) {
+    int lineCount = 0;
+    int triCount = 0;
+    BuildOverlayGeometry(renderer, view, &lineCount, &triCount);
+    if (lineCount == 0 && triCount == 0) {
+        return;
+    }
+
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = destination;
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    Mat4 viewProjection = renderer->viewProjection;
+
+    id<MTLRenderCommandEncoder> encoder =
+        [commandBuffer renderCommandEncoderWithDescriptor:pass];
+    [encoder setRenderPipelineState:renderer->overlayPipeline];
+    [encoder setViewport:viewport];
+    [encoder setVertexBytes:&viewProjection length:sizeof(viewProjection) atIndex:1];
+
+    if (triCount > 0) {
+        [encoder setVertexBuffer:renderer->overlayTriBuffer offset:0 atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:triCount];
+    }
+    if (lineCount > 0) {
+        [encoder setVertexBuffer:renderer->overlayLineBuffer offset:0 atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:lineCount];
+    }
+    [encoder endEncoding];
+}
+
 } // namespace
 
 namespace {
@@ -855,7 +1110,8 @@ void ResolvePassTimings(RendererState *renderer, uint32_t encodedSlotMask,
 
 } // namespace
 
-void RendererRender(RendererState *renderer, const SceneState *scene, RenderTarget *targetPtr) {
+void RendererRender(RendererState *renderer, const RendererSceneView *view,
+                    RenderTarget *targetPtr) {
     RenderTarget target = *targetPtr;
     bool aoEnabled = renderer->debugMode != 2;
     bool fxaaEnabled = renderer->fxaaEnabled;
@@ -866,7 +1122,7 @@ void RendererRender(RendererState *renderer, const SceneState *scene, RenderTarg
                                    (double)renderer->screenWidth, (double)renderer->screenHeight,
                                    0.0, 1.0};
 
-    EncodeGeometryPass(renderer, scene, target.commandBuffer);
+    EncodeGeometryPass(renderer, view, target.commandBuffer);
     if (aoEnabled) {
         EncodeAoPass(renderer, target.commandBuffer);
     }
@@ -876,6 +1132,8 @@ void RendererRender(RendererState *renderer, const SceneState *scene, RenderTarg
     } else {
         EncodeLightingPass(renderer, target.commandBuffer, target.drawable.texture, contentViewport);
     }
+    EncodeOverlayPass(renderer, view, target.commandBuffer, target.drawable.texture,
+                      contentViewport);
 
     uint32_t encodedSlotMask =
         (1u << 0) | (1u << 2) | (aoEnabled ? (1u << 1) : 0u) | (fxaaEnabled ? (1u << 3) : 0u);

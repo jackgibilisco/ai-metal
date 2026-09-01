@@ -26,7 +26,22 @@ struct AppState {
     bool snapEnabled;
     bool fullscreen; // tracked from the last FrameInput, for CommandContext
     int forcedRenderFrames; // FrameUpdate reports "needs render" while this is > 0
+
+    // Viewport interaction. FrameInput carries the mouse button as a level, so
+    // the press/release edges are recovered from the previous frame's state.
+    bool mouseLeftWasDown;
+    GizmoHandle hoveredHandle;
+    GizmoHandle activeHandle;
+    GizmoDrag gizmoDrag;
+    bool gizmoVisible;
+    Vec3 gizmoPivot;
+    bool boxSelecting;
+    float boxAnchorX;
+    float boxAnchorY;
 };
+
+// A drag shorter than this is a click on empty space, not a box select.
+constexpr float kBoxSelectMinPixels = 3.0f;
 
 CommandContext AppStateContext(AppState *appState) {
     return CommandContext{&appState->menu, appState->menuHooks, appState->fullscreen};
@@ -48,6 +63,135 @@ void AppAddListener(void *context) {
     AppState *appState = (AppState *)context;
     Ray noRay = {};
     ToolAddListener(appState->scene, noRay, RendererCameraFocus(appState->renderer));
+    appState->forcedRenderFrames = 3;
+}
+
+// Drawable pixels (top-left origin) -> the NDC rect SceneBoxSelect wants. The
+// content rect comes from the UI so this matches the renderer's viewport.
+NdcRect ScreenRectToNdc(AppState *appState, float x0, float y0, float x1, float y1) {
+    float originX = UiContentOriginX(appState->ui);
+    float originY = UiContentOriginY(appState->ui);
+    float width = UiContentWidth(appState->ui);
+    float height = UiContentHeight(appState->ui);
+
+    float ndcX0 = 2.0f * (x0 - originX) / width - 1.0f;
+    float ndcX1 = 2.0f * (x1 - originX) / width - 1.0f;
+    float ndcY0 = 1.0f - 2.0f * (y0 - originY) / height;
+    float ndcY1 = 1.0f - 2.0f * (y1 - originY) / height;
+
+    NdcRect rect;
+    rect.minX = ndcX0 < ndcX1 ? ndcX0 : ndcX1;
+    rect.maxX = ndcX0 < ndcX1 ? ndcX1 : ndcX0;
+    rect.minY = ndcY0 < ndcY1 ? ndcY0 : ndcY1;
+    rect.maxY = ndcY0 < ndcY1 ? ndcY1 : ndcY0;
+    return rect;
+}
+
+// Returns true when an entity was under the ray.
+bool SelectEntityAt(AppState *appState, Ray ray, bool additive) {
+    PickResult hit;
+    if (ScenePickRay(appState->scene, ray, &hit)) {
+        SelectionItem item = {SelectionKind_Entity, (uint32_t)hit.entity};
+        if (additive) {
+            SceneSelectionToggle(appState->scene, item);
+        } else {
+            SceneSelectionSet(appState->scene, &item, 1);
+        }
+        return true;
+    }
+    if (!additive) {
+        SceneSelectionClear(appState->scene);
+    }
+    return false;
+}
+
+// Click-select, box-select and gizmo drags. Runs after RendererUpdateCamera so
+// the picking ray uses this frame's camera.
+void UpdateViewportInteraction(AppState *appState, FrameInput input) {
+    SceneState *scene = appState->scene;
+    ToolMode toolMode = SceneToolMode(scene);
+
+    bool leftDown = input.mouseLeftDown;
+    bool pressed = leftDown && !appState->mouseLeftWasDown;
+    appState->mouseLeftWasDown = leftDown;
+
+    Ray ray = RendererScreenPointToRay(appState->renderer, input.mouseX, input.mouseY);
+
+    // An in-flight drag keeps running even if the pointer crosses a panel, so
+    // releasing outside the viewport still commits one undo step.
+    if (appState->gizmoDrag.active) {
+        if (leftDown) {
+            TransformDelta delta = GizmoUpdateDrag(&appState->gizmoDrag, ray);
+            ScenePreviewTransformDrag(scene, delta);
+            // The gizmo rides along with the entities it is moving; rotate and
+            // scale leave the pivot where the drag started.
+            appState->gizmoPivot = Vec3Add(appState->gizmoDrag.pivot, delta.translate);
+        } else {
+            SceneEndTransformDrag(scene, GizmoEndDrag(&appState->gizmoDrag, ray));
+            appState->activeHandle = GizmoHandle::None;
+        }
+        appState->forcedRenderFrames = 3;
+        return;
+    }
+
+    if (appState->boxSelecting) {
+        if (!leftDown) {
+            appState->boxSelecting = false;
+            float dragX = input.mouseX - appState->boxAnchorX;
+            float dragY = input.mouseY - appState->boxAnchorY;
+            bool isBox = dragX * dragX + dragY * dragY >=
+                         kBoxSelectMinPixels * kBoxSelectMinPixels;
+            if (isBox) {
+                NdcRect rect = ScreenRectToNdc(appState, appState->boxAnchorX,
+                                               appState->boxAnchorY, input.mouseX, input.mouseY);
+                SceneBoxSelect(scene, RendererViewProjection(appState->renderer), rect, input.shift);
+            }
+        }
+        appState->forcedRenderFrames = 3;
+        return;
+    }
+
+    Selection selection = SceneSelection(scene);
+    appState->gizmoVisible =
+        ToolModeHasGizmo(toolMode) && EntityIdValid(selection.activeEntity);
+    appState->gizmoPivot = SceneSelectionCentroid(scene);
+
+    if (UiWantsMouse(appState->ui)) {
+        appState->hoveredHandle = GizmoHandle::None;
+        return;
+    }
+
+    float scale = RendererGizmoScale(appState->renderer, appState->gizmoPivot);
+    GizmoHandle handle = appState->gizmoVisible
+                             ? GizmoHitTest(toolMode, appState->gizmoPivot, scale, ray)
+                             : GizmoHandle::None;
+
+    if (!leftDown && handle != appState->hoveredHandle) {
+        appState->hoveredHandle = handle;
+        appState->forcedRenderFrames = 3;
+    }
+
+    if (!pressed) {
+        return;
+    }
+
+    if (handle != GizmoHandle::None) {
+        SceneBeginTransformDrag(scene);
+        appState->gizmoDrag = GizmoBeginDrag(toolMode, handle, appState->gizmoPivot, scale, ray);
+        appState->activeHandle = handle;
+        appState->forcedRenderFrames = 3;
+        return;
+    }
+
+    // Clicking off the gizmo selects, in every tool mode — otherwise a
+    // transform tool with an empty selection would be a dead end. Only the
+    // Select tool starts a box drag.
+    bool hitEntity = SelectEntityAt(appState, ray, input.shift);
+    if (!hitEntity && toolMode == ToolMode_Select) {
+        appState->boxSelecting = true;
+        appState->boxAnchorX = input.mouseX;
+        appState->boxAnchorY = input.mouseY;
+    }
     appState->forcedRenderFrames = 3;
 }
 
@@ -128,6 +272,7 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
         cameraInput.orbitPitch = 0.0f;
     }
     RendererUpdateCamera(appState->renderer, cameraInput);
+    UpdateViewportInteraction(appState, input);
 
     bool cameraMoved = cameraInput.panX != 0.0f || cameraInput.panY != 0.0f ||
                        cameraInput.zoomDelta != 0.0f || cameraInput.orbitYaw != 0.0f ||
@@ -149,7 +294,14 @@ void FrameRender(Arena *arena, RenderTarget *target) {
     RendererSetContentRect(appState->renderer, UiContentOriginX(appState->ui),
                            UiContentOriginY(appState->ui), UiContentWidth(appState->ui),
                            UiContentHeight(appState->ui));
-    RendererRender(appState->renderer, appState->scene, target);
+    RendererSceneView view = {};
+    view.scene = appState->scene;
+    view.toolMode = SceneToolMode(appState->scene);
+    view.gizmoVisible = appState->gizmoVisible;
+    view.gizmoPivot = appState->gizmoPivot;
+    view.hoveredHandle = appState->hoveredHandle;
+    view.activeHandle = appState->activeHandle;
+    RendererRender(appState->renderer, &view, target);
     UiRenderEncode(appState->uiRender, target, UiVertices(appState->ui),
                    UiVertexCount(appState->ui), UiDrawableWidth(appState->ui),
                    UiDrawableHeight(appState->ui));
