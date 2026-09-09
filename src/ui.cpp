@@ -804,8 +804,16 @@ constexpr float kTimelineMinPixelsPerSecond = 6.0f;
 constexpr float kTimelineMaxPixelsPerSecond = 400.0f;
 constexpr float kTimelineTransportHeight = 26.0f;
 constexpr float kTimelineRulerHeight = 28.0f;
-constexpr float kTimelineLaneHeight = 34.0f;
-constexpr float kTimelineHeaderWidth = 150.0f;
+
+// Track header: two stacked text rows (name over volume + mute/solo). A row is
+// TextLineHeight() tall (20 px); the lane height is derived so the rows and
+// their padding always fit.
+constexpr float kTimelineHeaderPad = 6.0f;
+constexpr float kTimelineHeaderRowH = 20.0f;
+constexpr float kTimelineHeaderRowGap = 6.0f;
+constexpr float kTimelineLaneHeight =
+    kTimelineHeaderPad * 2.0f + kTimelineHeaderRowH * 2.0f + kTimelineHeaderRowGap;
+constexpr float kTimelineHeaderWidth = 184.0f;
 constexpr float kTimelineTrimHandleWidth = 6.0f;
 constexpr float kTimelinePlayheadGrabPx = 5.0f;
 constexpr int kTimelineRulerLabelSeconds = 5;
@@ -815,6 +823,13 @@ constexpr int kTimelinePlayId = 800010;
 constexpr int kTimelineStopId = 800011;
 constexpr int kTimelinePlayheadId = 800012;
 constexpr int kTimelineClipIdBase = 810000;
+constexpr int kTimelineTrackCtlBase = 820000; // 4 ids per lane: name, volume, mute, solo
+
+// Inline text edit (defined with the scene outliner below; the timeline track
+// headers reuse it for rename).
+enum { UiEdit_None = 0, UiEdit_Commit, UiEdit_Cancel };
+void BeginTextEdit(UiState *ui, int id, const char *initial);
+int TextInputWidget(UiState *ui, Rect r, char *out, int outCap);
 
 enum {
     TimelineDrag_None = 0,
@@ -954,7 +969,45 @@ void BuildTimelineRuler(UiState *ui, TimelineState *timeline, const TimelineLayo
     }
 }
 
-void DrawTimelineLanes(UiState *ui, const TimelineLayout &layout) {
+// Compact slider for a 14 px track-header row; writes *value in [0, 1].
+void TimelineHeaderSlider(UiState *ui, int id, Rect r, float *value) {
+    bool inside = PointInRect(ui->mouseX, ui->mouseY, r);
+    if (inside) {
+        ui->hotId = id;
+    }
+    if (inside && ui->mousePressed) {
+        ui->activeId = id;
+    }
+    if (ui->activeId == id && ui->mouseDown) {
+        *value = Clamp((ui->mouseX - r.x) / r.w, 0.0f, 1.0f);
+    }
+    PushRect(ui, {r.x, r.y + r.h * 0.5f - 2.0f, r.w, 4.0f}, kTrackCol);
+    float handleX = r.x + (*value) * (r.w - 8.0f);
+    bool hot = ui->hotId == id || ui->activeId == id;
+    PushRect(ui, {handleX, r.y, 8.0f, r.h}, hot ? kHandleHot : kHandleCol);
+}
+
+// Compact latching toggle; returns true on the click that flipped it.
+bool TimelineHeaderToggle(UiState *ui, int id, Rect r, const char *label, bool on) {
+    bool inside = PointInRect(ui->mouseX, ui->mouseY, r);
+    if (inside) {
+        ui->hotId = id;
+    }
+    if (inside && ui->mousePressed) {
+        ui->activeId = id;
+    }
+    bool clicked = ui->activeId == id && ui->mouseReleased && inside;
+    Color bg = on ? kButtonActive : (ui->hotId == id ? kButtonHot : kButtonCol);
+    PushRect(ui, r, bg);
+    PushText(ui, r.x + (r.w - TextWidth(label)) * 0.5f, r.y + (r.h - TextLineHeight()) * 0.5f, label,
+             on ? kTextCol : kTextDisabled);
+    return clicked;
+}
+
+// Each lane: striped time-domain background plus a header rectangle carrying the
+// source name (double-click to rename), a volume slider, and mute / solo. The
+// slider and buttons write straight to the source's AudioSourceParams.
+void BuildTimelineLanes(UiState *ui, SceneState *scene, const TimelineLayout &layout) {
     for (int lane = 0; lane < layout.laneCount; ++lane) {
         float y = layout.lanesY + lane * kTimelineLaneHeight;
         PushRect(ui, {layout.rulerX, y, layout.rulerRight - layout.rulerX, kTimelineLaneHeight},
@@ -964,20 +1017,52 @@ void DrawTimelineLanes(UiState *ui, const TimelineLayout &layout) {
                        kTimelineLaneHeight};
         PushRect(ui, header, theme::TimelineLaneHeader);
 
-        float textY = y + (kTimelineLaneHeight - TextLineHeight()) * 0.5f;
-        char name[7];
-        strncpy(name, layout.laneInfo[lane].name, sizeof(name) - 1);
-        name[sizeof(name) - 1] = '\0';
-        PushText(ui, header.x + 6.0f, textY, name, kTextCol);
+        EntityId source = layout.laneInfo[lane].source;
+        int nameId = kTimelineTrackCtlBase + lane * 4 + 0;
+        int volId = kTimelineTrackCtlBase + lane * 4 + 1;
+        int muteId = kTimelineTrackCtlBase + lane * 4 + 2;
+        int soloId = kTimelineTrackCtlBase + lane * 4 + 3;
 
-        bool muted = layout.laneInfo[lane].muted;
-        bool soloed = layout.laneInfo[lane].soloed;
-        Rect mute = {header.x + header.w - 42.0f, textY, 18.0f, 18.0f};
-        Rect solo = {header.x + header.w - 21.0f, textY, 18.0f, 18.0f};
-        PushRect(ui, mute, muted ? kButtonActive : kButtonCol);
-        PushRect(ui, solo, soloed ? kButtonActive : kButtonCol);
-        PushText(ui, mute.x + 1.0f, textY, "M", muted ? kTextCol : kTextDisabled);
-        PushText(ui, solo.x + 1.0f, textY, "S", soloed ? kTextCol : kTextDisabled);
+        Rect nameRect = {header.x + kTimelineHeaderPad, y + kTimelineHeaderPad,
+                         header.w - kTimelineHeaderPad * 2.0f, kTimelineHeaderRowH};
+        if (ui->focusedInputId == nameId) {
+            char newName[64];
+            if (TextInputWidget(ui, nameRect, newName, sizeof(newName)) == UiEdit_Commit &&
+                newName[0] != '\0') {
+                SceneRenameEntity(scene, source, newName);
+            }
+        } else {
+            PushText(ui, nameRect.x, nameRect.y, layout.laneInfo[lane].name, kTextCol);
+            if (ui->mousePressed && PointInRect(ui->mouseX, ui->mouseY, nameRect)) {
+                bool doubleClick = ui->lastClickControlId == nameId &&
+                                   (ui->frameIndex - ui->lastClickFrame) < 18;
+                ui->lastClickControlId = nameId;
+                ui->lastClickFrame = ui->frameIndex;
+                if (doubleClick) {
+                    BeginTextEdit(ui, nameId, layout.laneInfo[lane].name);
+                }
+            }
+        }
+
+        float rowY = y + kTimelineHeaderPad + kTimelineHeaderRowH + kTimelineHeaderRowGap;
+        float toggleW = 22.0f;
+        float toggleGap = 4.0f;
+        Rect soloRect = {header.x + header.w - kTimelineHeaderPad - toggleW, rowY, toggleW,
+                         kTimelineHeaderRowH};
+        Rect muteRect = {soloRect.x - toggleGap - toggleW, rowY, toggleW, kTimelineHeaderRowH};
+        float volLeft = header.x + kTimelineHeaderPad;
+        Rect volRect = {volLeft, rowY, muteRect.x - toggleGap - volLeft, kTimelineHeaderRowH};
+
+        AudioSourceParams *params = SceneFindAudioSourceParams(scene, source);
+        if (params != nullptr) {
+            TimelineHeaderSlider(ui, volId, volRect, &params->gain);
+            if (TimelineHeaderToggle(ui, muteId, muteRect, "M", params->mute)) {
+                params->mute = !params->mute;
+            }
+            if (TimelineHeaderToggle(ui, soloId, soloRect, "S", params->solo)) {
+                params->solo = !params->solo;
+            }
+        }
     }
 }
 
@@ -1134,20 +1219,16 @@ void HandleTimelineDrop(UiState *ui, FrameInput input, const TimelineLayout &lay
     }
 
     int lane = TimelineLaneAtY(layout, input.dropY);
-    TrackId track = lane >= 0 ? layout.laneTracks[lane] : kInvalidTrackId;
+    TrackId track = lane >= 0 ? layout.laneTracks[lane] : SelectedAudioSource(ui->editor.scene);
+    if (track == kInvalidTrackId) {
+        return; // a clip needs a source; there is no lane and none selected
+    }
     double dropTime = TimelineXToTime(layout, input.dropX);
 
     for (int i = 0; i < input.droppedFileCount; ++i) {
         WavId wav = AudioLoadWav(ui->editor.audio, input.droppedFiles[i]);
         if (!WavIdValid(wav)) {
             continue;
-        }
-        if (track == kInvalidTrackId) {
-            track = TimelineAddTrack(ui->editor.timeline, ui->editor.scene,
-                                           SelectedAudioSource(ui->editor.scene), "Track");
-            if (track == kInvalidTrackId) {
-                return;
-            }
         }
         double duration = AudioWavDuration(ui->editor.audio, wav);
         TimelineAddClip(ui->editor.timeline, ui->editor.scene, track, wav, dropTime,
@@ -1170,7 +1251,7 @@ void BuildTimelineBody(UiState *ui, FrameInput input) {
     }
 
     static TimelineTrackRow trackRows[kMaxTimelineTracks];
-    int trackCount = TimelineTracks(timeline, trackRows, kMaxTimelineTracks);
+    int trackCount = TimelineTracks(timeline, scene, trackRows, kMaxTimelineTracks);
     float lanesViewH = (body.y + body.h) - lanesTop;
     float lanesFullH = (float)trackCount * kTimelineLaneHeight;
     float maxLaneScroll = lanesFullH > lanesViewH ? lanesFullH - lanesViewH : 0.0f;
@@ -1228,7 +1309,7 @@ void BuildTimelineBody(UiState *ui, FrameInput input) {
 
     BuildTimelineTransport(ui, timeline, {body.x, body.y, body.w, kTimelineTransportHeight});
     BuildTimelineRuler(ui, timeline, layout);
-    DrawTimelineLanes(ui, layout);
+    BuildTimelineLanes(ui, scene, layout);
     BuildTimelineClips(ui, timeline, scene, layout);
     DrawTimelinePlayhead(ui, timeline, layout);
     DrawTimelineDropGhost(ui, input, layout);
@@ -1241,8 +1322,6 @@ void BuildTimelineBody(UiState *ui, FrameInput input) {
 }
 
 // ---- scene outliner (right panel) --------------------------------------
-
-enum { UiEdit_None = 0, UiEdit_Commit, UiEdit_Cancel };
 
 void BeginTextEdit(UiState *ui, int id, const char *initial) {
     ui->focusedInputId = id;
@@ -1563,7 +1642,7 @@ void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext) {
     UiPanelButton(ui, "Reset Camera");
     UiEndPanel(ui);
 
-    UiBeginPanel(ui, 3, "Timeline", UiDock_Bottom, 240.0f);
+    UiBeginPanel(ui, 3, "Timeline", UiDock_Bottom, 300.0f);
     BuildTimelineBody(ui, input);
     UiEndPanel(ui);
 

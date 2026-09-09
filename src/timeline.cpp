@@ -23,20 +23,12 @@ enum {
     TL_DeleteClip,
     TL_MoveClip,
     TL_TrimClip,
-    TL_AddTrack,
-    TL_RemoveTrack,
 };
 
 struct ClipSlot {
     bool used;
     uint32_t generation;
     TimelineClip clip;
-};
-
-struct TrackSlot {
-    bool used;
-    uint32_t generation;
-    TimelineTrack track;
 };
 
 // One undo step's worth of before/after state. The undo stack passes handlers
@@ -50,8 +42,6 @@ struct TimelineCmdPayload {
     uint32_t generation; // the (re)used slot's generation for this edit
     TimelineClip clipBefore;
     TimelineClip clipAfter;
-    TimelineTrack trackBefore;
-    TimelineTrack trackAfter;
 };
 
 } // namespace
@@ -59,7 +49,6 @@ struct TimelineCmdPayload {
 struct TimelineState {
     TimelineTransport transport;
     ClipSlot clips[kMaxTimelineClips];
-    TrackSlot tracks[kMaxTimelineTracks];
 };
 
 namespace {
@@ -83,21 +72,6 @@ ClipSlot *FindClipSlot(TimelineState *timeline, TimelineClipId id) {
     return const_cast<ClipSlot *>(FindClipSlotConst(timeline, id));
 }
 
-const TrackSlot *FindTrackSlotConst(const TimelineState *timeline, TrackId id) {
-    if (id == kInvalidTrackId) {
-        return nullptr;
-    }
-    uint32_t slot = HandleSlot(id);
-    if (slot >= (uint32_t)kMaxTimelineTracks) {
-        return nullptr;
-    }
-    const TrackSlot *entry = &timeline->tracks[slot];
-    if (!entry->used || entry->generation != HandleGen(id)) {
-        return nullptr;
-    }
-    return entry;
-}
-
 int FirstFreeClip(const TimelineState *timeline) {
     for (int i = 0; i < kMaxTimelineClips; ++i) {
         if (!timeline->clips[i].used) {
@@ -107,13 +81,9 @@ int FirstFreeClip(const TimelineState *timeline) {
     return -1;
 }
 
-int FirstFreeTrack(const TimelineState *timeline) {
-    for (int i = 0; i < kMaxTimelineTracks; ++i) {
-        if (!timeline->tracks[i].used) {
-            return i;
-        }
-    }
-    return -1;
+bool TrackIsLiveSource(const SceneState *scene, TrackId track) {
+    const Entity *entity = SceneFindEntity(scene, track);
+    return entity != nullptr && entity->kind == EntityKind_AudioSource;
 }
 
 SelectionItem ClipSelectionItem(uint32_t slot, uint32_t generation) {
@@ -158,28 +128,6 @@ void ApplyPayload(SceneState *scene, void *payloadPtr, bool redo) {
         entry->clip = redo ? payload->clipAfter : payload->clipBefore;
         break;
     }
-    case TL_AddTrack: {
-        TrackSlot *entry = &timeline->tracks[payload->slot];
-        if (redo) {
-            entry->used = true;
-            entry->generation = payload->generation;
-            entry->track = payload->trackAfter;
-        } else {
-            entry->used = false;
-        }
-        break;
-    }
-    case TL_RemoveTrack: {
-        TrackSlot *entry = &timeline->tracks[payload->slot];
-        if (redo) {
-            entry->used = false;
-        } else {
-            entry->used = true;
-            entry->generation = payload->generation;
-            entry->track = payload->trackBefore;
-        }
-        break;
-    }
     }
 }
 
@@ -217,15 +165,13 @@ void TimelineUpdate(TimelineState *timeline, FrameInput input, SceneState *scene
     if (scene == nullptr) {
         return;
     }
-    for (int i = 0; i < kMaxTimelineTracks; ++i) {
-        if (!timeline->tracks[i].used) {
+    for (int i = 0; i < kMaxTimelineClips; ++i) {
+        if (!timeline->clips[i].used) {
             continue;
         }
-        const TimelineTrack &track = timeline->tracks[i].track;
-        AudioSourceParams *params = SceneFindAudioSourceParams(scene, track.targetSource);
-        if (params != nullptr) {
-            params->mute = track.muted;
-            params->solo = track.soloed;
+        if (!TrackIsLiveSource(scene, timeline->clips[i].clip.track)) {
+            SceneSelectionRemove(scene, ClipSelectionItem(i, timeline->clips[i].generation));
+            timeline->clips[i].used = false;
         }
     }
 }
@@ -266,22 +212,24 @@ bool TimelineIsScrubbing(const TimelineState *timeline) {
 // ---------------------------------------------------------------------------
 // Model reads
 // ---------------------------------------------------------------------------
-int TimelineTracks(const TimelineState *timeline, TimelineTrackRow *out, int maxOut) {
+int TimelineTracks(const TimelineState *timeline, const SceneState *scene, TimelineTrackRow *out,
+                   int maxOut) {
+    (void)timeline;
+    static SceneAudioSourceView sources[kMaxTimelineTracks];
+    int sourceCount = SceneAudioSources(scene, sources, kMaxTimelineTracks);
     int n = 0;
-    for (int i = 0; i < kMaxTimelineTracks && n < maxOut; ++i) {
-        if (!timeline->tracks[i].used) {
-            continue;
-        }
-        out[n].id = MakeHandle(i, timeline->tracks[i].generation);
-        out[n].track = timeline->tracks[i].track;
+    for (int i = 0; i < sourceCount && n < maxOut; ++i) {
+        const Entity *entity = SceneFindEntity(scene, sources[i].entity);
+        out[n].id = sources[i].entity;
+        out[n].track.source = sources[i].entity;
+        snprintf(out[n].track.name, sizeof(out[n].track.name), "%s",
+                 entity != nullptr ? entity->name : "Source");
+        out[n].track.gain = sources[i].params.gain;
+        out[n].track.muted = sources[i].params.mute;
+        out[n].track.soloed = sources[i].params.solo;
         ++n;
     }
     return n;
-}
-
-const TimelineTrack *TimelineFindTrack(const TimelineState *timeline, TrackId id) {
-    const TrackSlot *entry = FindTrackSlotConst(timeline, id);
-    return entry != nullptr ? &entry->track : nullptr;
 }
 
 int TimelineClips(const TimelineState *timeline, TimelineClipRow *out, int maxOut) {
@@ -312,49 +260,9 @@ SelectionItem TimelineClipSelectionItem(TimelineClipId id) {
 // ---------------------------------------------------------------------------
 // Structural edits
 // ---------------------------------------------------------------------------
-TrackId TimelineAddTrack(TimelineState *timeline, SceneState *scene, EntityId targetSource,
-                               const char *name) {
-    int slot = FirstFreeTrack(timeline);
-    if (slot < 0) {
-        fprintf(stderr, "timeline: track pool full (%d), add dropped\n", kMaxTimelineTracks);
-        return kInvalidTrackId;
-    }
-    uint32_t generation = timeline->tracks[slot].generation + 1;
-
-    TimelineTrack track = {};
-    snprintf(track.name, sizeof(track.name), "%s", (name != nullptr && name[0] != '\0') ? name
-                                                                                        : "Track");
-    track.targetSource = targetSource;
-
-    TimelineCmdPayload storage = {};
-    TimelineCmdPayload *payload = &storage;
-    payload->timeline = timeline;
-    payload->kind = TL_AddTrack;
-    payload->slot = (uint32_t)slot;
-    payload->generation = generation;
-    payload->trackAfter = track;
-    UndoStackSubmit(SceneUndoStack(scene), TimelineCmdRedo, TimelineCmdUndo, payload, sizeof *payload);
-    return MakeHandle(slot, generation);
-}
-
-void TimelineRemoveTrack(TimelineState *timeline, SceneState *scene, TrackId id) {
-    const TrackSlot *entry = FindTrackSlotConst(timeline, id);
-    if (entry == nullptr) {
-        return;
-    }
-    TimelineCmdPayload storage = {};
-    TimelineCmdPayload *payload = &storage;
-    payload->timeline = timeline;
-    payload->kind = TL_RemoveTrack;
-    payload->slot = HandleSlot(id);
-    payload->generation = HandleGen(id);
-    payload->trackBefore = entry->track;
-    UndoStackSubmit(SceneUndoStack(scene), TimelineCmdRedo, TimelineCmdUndo, payload, sizeof *payload);
-}
-
 TimelineClipId TimelineAddClip(TimelineState *timeline, SceneState *scene, TrackId track,
                                         WavId wav, double startTime, double duration) {
-    if (TimelineFindTrack(timeline, track) == nullptr) {
+    if (!TrackIsLiveSource(scene, track)) {
         fprintf(stderr, "timeline: create clip on a dead track, dropped\n");
         return kInvalidTimelineClipId;
     }
@@ -406,7 +314,7 @@ void TimelineMoveClip(TimelineState *timeline, SceneState *scene, TimelineClipId
     if (entry == nullptr) {
         return;
     }
-    if (TimelineFindTrack(timeline, newTrack) == nullptr) {
+    if (!TrackIsLiveSource(scene, newTrack)) {
         return;
     }
     TimelineCmdPayload storage = {};
@@ -463,15 +371,11 @@ int CollectVoices(const TimelineState *timeline, double time, bool filterSource,
         if (time < clip.startTime || time >= clip.startTime + clip.duration) {
             continue;
         }
-        const TimelineTrack *track = TimelineFindTrack(timeline, clip.track);
-        if (track == nullptr) {
-            continue;
-        }
-        if (filterSource && track->targetSource != source) {
+        if (filterSource && clip.track != source) {
             continue;
         }
         TimelineVoice &voice = out[count++];
-        voice.source = track->targetSource;
+        voice.source = clip.track;
         voice.wav = clip.wav;
         voice.localOffset = clip.trimIn + (time - clip.startTime);
         voice.gain = clip.gain;

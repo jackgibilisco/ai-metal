@@ -20,10 +20,14 @@
 
 struct TimelineState; // opaque; defined in timeline.cpp
 
-// Handles pack [31:12] generation | [11:0] slot, so a slot reused after a
-// delete never aliases an old handle. 0 is always invalid. Clip handles also
-// ride inside SelectionItem.id (a uint32_t) in the shared selection set.
-typedef uint32_t TrackId;
+// A track is one scene audio source: there is exactly one lane per source, in
+// source order, and TrackId IS that source's EntityId. The timeline stores no
+// track state of its own -- name/gain/mute/solo live on the source.
+//
+// Clip handles still pack [31:12] generation | [11:0] slot, so a slot reused
+// after a delete never aliases an old handle. 0 is always invalid. Clip handles
+// also ride inside SelectionItem.id (a uint32_t) in the shared selection set.
+typedef EntityId TrackId;
 typedef uint32_t TimelineClipId;
 constexpr TrackId kInvalidTrackId = 0;
 constexpr TimelineClipId kInvalidTimelineClipId = 0;
@@ -31,9 +35,11 @@ constexpr TimelineClipId kInvalidTimelineClipId = 0;
 constexpr int kMaxTimelineTracks = 64;
 constexpr int kMaxTimelineClips = 1024;
 
+// Per-query view of one source; every field is copied from the scene.
 struct TimelineTrack {
-    char name[32];
-    EntityId targetSource; // the scene audio source this lane drives
+    EntityId source;
+    char name[64];
+    float gain;
     bool muted;
     bool soloed;
 };
@@ -60,9 +66,9 @@ struct TimelineTransport {
 TimelineState *TimelineInit(Arena *arena);
 
 // Called once per frame by app.cpp BEFORE the sim-time gate. Consumes a
-// pending scrub, advances the clock by deltaTime while playing, and mirrors
-// each track's mute/solo into its source's AudioSourceParams. Panel-driven
-// edits are submitted from ui.cpp, not here.
+// pending scrub, advances the clock by deltaTime while playing, and drops any
+// clip whose source entity has been deleted. Panel-driven edits are submitted
+// from ui.cpp, not here.
 void TimelineUpdate(TimelineState *timeline, FrameInput input, SceneState *scene, double deltaTime);
 
 bool TimelineIsPlaying(const TimelineState *timeline);
@@ -88,7 +94,9 @@ struct TimelineTrackRow {
     TrackId id;
     TimelineTrack track;
 };
-int TimelineTracks(const TimelineState *timeline, TimelineTrackRow *out, int maxOut); // lane order
+// One row per scene audio source, in source order.
+int TimelineTracks(const TimelineState *timeline, const SceneState *scene, TimelineTrackRow *out,
+                   int maxOut);
 
 struct TimelineClipRow {
     TimelineClipId id;
@@ -96,7 +104,6 @@ struct TimelineClipRow {
 };
 int TimelineClips(const TimelineState *timeline, TimelineClipRow *out, int maxOut);
 
-const TimelineTrack *TimelineFindTrack(const TimelineState *timeline, TrackId id); // null if stale
 const TimelineClip *TimelineFindClip(const TimelineState *timeline, TimelineClipId id); // null if stale
 
 // The SelectionItem a clip occupies in the shared selection set.
@@ -106,10 +113,6 @@ SelectionItem TimelineClipSelectionItem(TimelineClipId id);
 // Structural edits (undoable; each submits exactly one Command to `scene`)
 // ---------------------------------------------------------------------------
 // Return the new handle, or kInvalid* on a full pool (drop + log).
-TrackId TimelineAddTrack(TimelineState *timeline, SceneState *scene, EntityId targetSource,
-                               const char *name);
-void TimelineRemoveTrack(TimelineState *timeline, SceneState *scene, TrackId id);
-
 // The panel has already called AudioLoadWav; it passes the wav handle and the
 // clip length it wants (typically the wav's full duration).
 TimelineClipId TimelineAddClip(TimelineState *timeline, SceneState *scene, TrackId track,

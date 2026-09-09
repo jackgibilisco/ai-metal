@@ -588,9 +588,13 @@ static void MenuHookQuit(void *context) {
     _arenaMemory = calloc(1, kArenaSize);
     _arena = ArenaCreate(_arenaMemory, kArenaSize);
 
-    NSRect frame = NSMakeRect(0, 0, kWindowWidth, kWindowHeight);
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                   NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
+    NSRect frame = NSMakeRect(0, 0, kWindowWidth, kWindowHeight);
+    NSScreen *screen = [NSScreen mainScreen];
+    if (screen != nil) {
+        frame = [NSWindow contentRectForFrameRect:screen.visibleFrame styleMask:styleMask];
+    }
     self.window = [[AppWindow alloc] initWithContentRect:frame
                                                styleMask:styleMask
                                                  backing:NSBackingStoreBuffered
