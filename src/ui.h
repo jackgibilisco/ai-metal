@@ -38,6 +38,7 @@ struct UiFontMetrics {
     float descent;   // baseline to bottom of the line (positive)
     float lineHeight; // ascent + descent + leading
     float pixelSize;  // size the atlas was rasterized at
+    float capHeight;  // ink height of 'H', for vertical centering
 };
 
 struct UiState;

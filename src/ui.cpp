@@ -207,7 +207,7 @@ const UiFontMetrics *g_font = nullptr;
 float TextLineHeight() { return g_font != nullptr ? g_font->pixelSize : kFallbackLineHeight; }
 
 // Cap height from a reference uppercase glyph, for visual vertical centring.
-float TextCapHeight() { return g_font != nullptr ? g_font->glyphs['H' - 32].height : kGlyphPixels; }
+float TextCapHeight() { return g_font != nullptr ? g_font->capHeight : kGlyphPixels; }
 
 const UiGlyphMetric *GlyphFor(int codepoint) {
     if (codepoint < 32 || codepoint >= 128) {
