@@ -1071,7 +1071,7 @@ void BuildOverlayGeometry(RendererState *renderer, const RendererSceneView *view
         CopyThemeColor(gizmoColors.uniform, theme::SelectionOutline);
 
         GizmoHandle highlighted =
-            view->activeHandle != GizmoHandle::None ? view->activeHandle : view->hoveredHandle;
+            view->activeHandle != GizmoHandle_None ? view->activeHandle : view->hoveredHandle;
         GizmoBuild(&builder, view->toolMode, view->gizmoPivot,
                    RendererGizmoScale(renderer, view->gizmoPivot), highlighted, gizmoColors);
     }

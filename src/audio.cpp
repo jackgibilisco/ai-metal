@@ -17,7 +17,7 @@
 #include <cstdio>
 #include <cstring>
 
-// --- small Vec3 helpers (math3d.h owns Mat4 only; Eric will not take Vec3 ---
+// --- small Vec3 helpers (math3d.h owns Mat4 only; scene.h will not take Vec3 ---
 // additions this round, so keep these local) ------------------------------
 static Vec3 Sub(Vec3 a, Vec3 b) { return Vec3{a.x - b.x, a.y - b.y, a.z - b.z}; }
 static float Dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -77,7 +77,7 @@ struct AudioState {
     size_t pcmPoolSize;
     size_t pcmPoolUsed;
 
-    AudioClip clips[kAudioClipCapacity];
+    AudioClip clips[kWavRegistryCapacity];
     int clipCount;
 
     VoiceParams voiceBuf[2][kAudioMaxVoices];
@@ -280,8 +280,8 @@ void AudioShutdown(AudioState *audio) {
 
 int AudioDeviceSampleRate(const AudioState *audio) { return audio ? audio->sampleRate : 0; }
 
-double AudioClipDuration(const AudioState *audio, ClipId clip) {
-    if (!audio || !ClipIdValid(clip) || clip.index >= audio->clipCount) return 0.0;
+double AudioWavDuration(const AudioState *audio, WavId clip) {
+    if (!audio || !WavIdValid(clip) || clip.index >= audio->clipCount) return 0.0;
     const AudioClip *c = &audio->clips[clip.index];
     if (!c->valid || audio->sampleRate <= 0) return 0.0;
     return (double)c->frameCount / (double)audio->sampleRate;
@@ -296,18 +296,18 @@ static float *PcmPoolAlloc(AudioState *audio, uint64_t frameCount) {
     return ptr;
 }
 
-ClipId AudioLoadClip(AudioState *audio, const char *wavPath) {
-    if (!audio) return kInvalidClipId;
-    if (audio->clipCount >= kAudioClipCapacity) {
-        fprintf(stderr, "audio: clip registry full (%d), '%s' dropped\n", kAudioClipCapacity, wavPath);
-        return kInvalidClipId;
+WavId AudioLoadWav(AudioState *audio, const char *wavPath) {
+    if (!audio) return kInvalidWavId;
+    if (audio->clipCount >= kWavRegistryCapacity) {
+        fprintf(stderr, "audio: clip registry full (%d), '%s' dropped\n", kWavRegistryCapacity, wavPath);
+        return kInvalidWavId;
     }
 
     ma_decoder_config decoderConfig = ma_decoder_config_init(ma_format_f32, 0, audio->sampleRate);
     ma_decoder decoder;
     if (ma_decoder_init_file(wavPath, &decoderConfig, &decoder) != MA_SUCCESS) {
         fprintf(stderr, "audio: cannot open/decode '%s'\n", wavPath);
-        return kInvalidClipId;
+        return kInvalidWavId;
     }
 
     int channels = (int)decoder.outputChannels;
@@ -321,7 +321,7 @@ ClipId AudioLoadClip(AudioState *audio, const char *wavPath) {
     if (totalFrames == 0) {
         fprintf(stderr, "audio: '%s' decoded to 0 frames\n", wavPath);
         ma_decoder_uninit(&decoder);
-        return kInvalidClipId;
+        return kInvalidWavId;
     }
 
     float *mono = PcmPoolAlloc(audio, totalFrames);
@@ -329,7 +329,7 @@ ClipId AudioLoadClip(AudioState *audio, const char *wavPath) {
         fprintf(stderr, "audio: PCM pool full (%zu MiB), '%s' dropped\n",
                 audio->pcmPoolSize / (1024 * 1024), wavPath);
         ma_decoder_uninit(&decoder);
-        return kInvalidClipId;
+        return kInvalidWavId;
     }
 
     float scratch[2048];
@@ -356,7 +356,7 @@ ClipId AudioLoadClip(AudioState *audio, const char *wavPath) {
     audio->clips[index].pcm = mono;
     audio->clips[index].frameCount = totalFrames;
     audio->clips[index].valid = true;
-    return ClipId{index};
+    return WavId{index};
 }
 
 // --- per-frame update ---------------------------------------------------
@@ -430,7 +430,7 @@ void AudioUpdate(AudioState *audio, const SceneState *scene, const TimelineState
 
         int voice = 0;
         for (int c = 0; c < activeCount && voice < kAudioMaxVoices; ++c) {
-            if (!ClipIdValid(timelineVoices[c].wav)) continue;
+            if (!WavIdValid(timelineVoices[c].wav)) continue;
             int clipIndex = timelineVoices[c].wav.index;
             if (clipIndex >= audio->clipCount || !audio->clips[clipIndex].valid) continue;
 
@@ -478,14 +478,14 @@ void AudioDebugSetListener(AudioState *audio, Vec3 position, Vec3 forward, Vec3 
     audio->debugListenerUp = up;
 }
 
-void AudioDebugSetVoice(AudioState *audio, int slot, ClipId clip, Vec3 worldPos,
+void AudioDebugSetVoice(AudioState *audio, int slot, WavId clip, Vec3 worldPos,
                         AudioSourceParams params, double localTime, bool occluded) {
     if (!audio || slot < 0 || slot >= kAudioMaxVoices) return;
     int front = audio->publishedBuffer.load(std::memory_order_relaxed);
     VoiceParams *back = audio->voiceBuf[front ^ 1];
     memcpy(back, audio->voiceBuf[front], sizeof(audio->voiceBuf[0]));
 
-    int clipIndex = ClipIdValid(clip) ? clip.index : -1;
+    int clipIndex = WavIdValid(clip) ? clip.index : -1;
     FillVoice(audio, &back[slot], worldPos, audio->debugListenerPos, audio->debugListenerFwd,
               audio->debugListenerUp, true, params, clipIndex, localTime, 1.0f, occluded,
               MakeVoiceKey(slot, clipIndex, 0));

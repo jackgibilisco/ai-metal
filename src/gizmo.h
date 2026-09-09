@@ -8,9 +8,9 @@
 // Split of concerns:
 //   - sizing / hit-test / drag / geometry: no SceneState access, headless
 //     testable with only the headers.
-//   - ToolAddAudioSource / ToolAddListener: call Eric's scene commands.
+//   - ToolAddAudioSource / ToolAddListener: submit scene commands.
 //
-// Colours are passed in by the renderer (which reads them from Dan's
+// Colours are passed in by the renderer (which reads them from
 // theme.h); this file hard-codes no colour.
 
 #include "math3d.h"
@@ -19,15 +19,15 @@
 // Which part of the gizmo the pointer is over or dragging. Axis handles map
 // to translate-along / rotate-about / scale-along by the active ToolMode.
 // Plane handles are translate-only; Uniform (the centre box) is scale-only.
-enum class GizmoHandle {
-    None,
-    AxisX,
-    AxisY,
-    AxisZ,
-    PlaneXY,
-    PlaneYZ,
-    PlaneZX,
-    Uniform,
+enum GizmoHandle {
+    GizmoHandle_None,
+    GizmoHandle_AxisX,
+    GizmoHandle_AxisY,
+    GizmoHandle_AxisZ,
+    GizmoHandle_PlaneXY,
+    GizmoHandle_PlaneYZ,
+    GizmoHandle_PlaneZX,
+    GizmoHandle_Uniform,
 };
 
 // True for the three tool modes that show a gizmo (everything but Select).
@@ -44,13 +44,13 @@ float GizmoWorldScale(Vec3 pivot, Vec3 cameraEye, float fovYRadians,
 
 // --- hit-testing --------------------------------------------------------------
 
-// Handle under `ray`, or GizmoHandle::None. `mode` selects which handles
+// Handle under `ray`, or GizmoHandle_None. `mode` selects which handles
 // exist (None for ToolMode_Select). `scale` is GizmoWorldScale's result.
 GizmoHandle GizmoHitTest(ToolMode mode, Vec3 pivot, float scale, Ray ray);
 
 // --- dragging -----------------------------------------------------------------
 
-// In-progress drag. Trivially copyable, holds no pointers; the manager keeps
+// In-progress drag. Trivially copyable, holds no pointers; app.cpp keeps
 // one in AppState across frames. Treat the fields as opaque.
 struct GizmoDrag {
     ToolMode mode;
@@ -126,7 +126,7 @@ struct IconInstance {
 };
 
 // theme.h: AudioSourceIcon / ListenerIcon / ListenerActive / SelectionOutline
-// (+ a distance-sphere colour name still to be reserved with Dan).
+// (+ DistanceSphere).
 struct IconColors {
     float source[4];
     float listener[4];
@@ -147,7 +147,7 @@ void GizmoBuildIcons(GizmoMeshBuilder *out, const IconInstance *icons, int count
 // when the ray is parallel to the plane or points away from it.
 bool RayGroundIntersect(Ray ray, float planeHeight, Vec3 *outPoint);
 
-// --- tool actions (call Eric's scene commands) -----------------------------
+// --- tool actions (submit scene commands) -----------------------------
 
 // Create an audio-source entity on the ground plane (y = 0) under the
 // cursor, or at `cameraFallbackPoint` when `cursorRay` misses the ground.

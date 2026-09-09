@@ -6,7 +6,7 @@
 //
 // Lifecycle:
 //   AudioInit()        once, from Init(), portable code
-//   AudioLoadClip()    any time (Dan's .wav drop) - sub-allocates from a
+//   AudioLoadWav()    any time (the .wav drop) - sub-allocates from a
 //                      fixed PCM pool reserved at init, never grows
 //   AudioUpdate()      once per frame, after the scene + timeline update
 //   AudioShutdown()    once, on teardown (stops the device)
@@ -14,26 +14,26 @@
 #include "arena.h"
 #include "math3d.h"
 
-struct SceneState;    // Eric  - listener + audio-source iteration, ScenePickRay
-struct TimelineState; // Dan   - active-clip query at a transport time
+struct SceneState;    // scene.h   - listener + audio-source iteration, ScenePickRay
+struct TimelineState; // timeline.h - active-clip query at a transport time
 struct AudioState;    // opaque; defined in audio.cpp
 
-// Handle into the AudioClip registry (fixed capacity 128). Distinct from a
-// timeline clip: this is one decoded .wav in memory. A negative index is the
+// Handle into the wav registry (fixed capacity 128). Distinct from a
+// timeline clip: this is one decoded .wav held in memory. A negative index is the
 // "load failed / empty slot" sentinel; never dereferenced by the mixer.
-struct ClipId {
+struct WavId {
     int index;
 };
-constexpr ClipId kInvalidClipId = {-1};
-inline bool ClipIdValid(ClipId id) { return id.index >= 0; }
+constexpr WavId kInvalidWavId = {-1};
+inline bool WavIdValid(WavId id) { return id.index >= 0; }
 
-constexpr int kAudioClipCapacity = 128;   // wav registry (plan pool cap)
-constexpr int kAudioSourceCapacity = 256; // scene audio sources (plan pool cap)
+constexpr int kWavRegistryCapacity = 128; // decoded-wav registry
+constexpr int kAudioSourceCapacity = 256; // scene audio sources
 
-// Embedded verbatim in Eric's AudioSource component. One of these per source
+// Embedded verbatim in the scene AudioSource component. One of these per source
 // entity; the mixer reads them every frame through the scene iteration API.
 struct AudioSourceParams {
-    ClipId clip;
+    WavId wav;
 
     float gain;    // linear, pre-spatial; 1.0 = unity
     float minDist; // distance attenuation is full-gain within this radius
@@ -50,7 +50,7 @@ struct AudioSourceParams {
 
 inline AudioSourceParams AudioSourceParamsDefault() {
     AudioSourceParams p = {};
-    p.clip = kInvalidClipId;
+    p.wav = kInvalidWavId;
     p.gain = 1.0f;
     p.minDist = 1.0f;
     p.maxDist = 25.0f;
@@ -63,8 +63,8 @@ inline AudioSourceParams AudioSourceParamsDefault() {
 }
 
 // pcmPoolBytes is carved from the arena once and holds every decoded clip's
-// mono f32 PCM at the device sample rate. 64 MiB ~= 5.5 min total at 48 kHz
-// (plan round 1: manager grows the main arena by this amount).
+// mono f32 PCM at the device sample rate. 64 MiB ~= 5.5 min total at 48 kHz;
+// app.cpp sizes the arena to include this.
 // On device-init failure returns a non-null state at a 48000 fallback rate
 // with the output device stopped: clips still decode/resample (useful for
 // tests and headless CI), the mixer just never reaches speakers. Logs once.
@@ -78,35 +78,35 @@ int AudioDeviceSampleRate(const AudioState *audio);
 
 // Decode `wavPath` (u8/s16/s24/s32/f32, mono or stereo), resample to the
 // device rate, downmix stereo -> mono (logs a warning: spatial voices need
-// mono), and store it in the PCM pool. Returns kInvalidClipId and logs on a
+// mono), and store it in the PCM pool. Returns kInvalidWavId and logs on a
 // missing file, an unreadable/parse-failed file, or a full registry/pool.
 // Never crashes.
-ClipId AudioLoadClip(AudioState *audio, const char *wavPath);
+WavId AudioLoadWav(AudioState *audio, const char *wavPath);
 
-// Decoded length in seconds (frames / device rate). 0 for an invalid ClipId.
-// Dan uses this to size a freshly dropped clip on the timeline.
-double AudioClipDuration(const AudioState *audio, ClipId clip);
+// Decoded length in seconds (frames / device rate). 0 for an invalid WavId.
+// The timeline panel uses this to size a freshly dropped clip on the timeline.
+double AudioWavDuration(const AudioState *audio, WavId clip);
 
 // Per-frame drive. Reads the active listener transform and every audio-source
 // transform + AudioSourceParams from `scene`, asks `timeline` which clip is
 // active on each source at `transportTime` (plus its local playback offset
 // and gain), and hands a fresh per-voice parameter block to the audio thread
 // (lock-free: back buffer + atomic publish). `transportTime` is seconds on
-// the global transport clock; the manager only advances it while the
+// the global transport clock; app.cpp only advances it while the
 // timeline is playing, so a paused transport passes a stalled value and the
 // mixer freezes every voice in place. Safe to call with scene or timeline
 // null (mixer goes silent).
 void AudioUpdate(AudioState *audio, const SceneState *scene,
                  const TimelineState *timeline, double transportTime);
 
-// --- Testing hooks (decode + attenuation + HRTF before scene.h lands) ------
+// --- Testing hooks: drive the mixer synchronously, no scene required ------
 // Same internal mixer the miniaudio callback runs, but callable synchronously
 // and fed by AudioDebugSetVoice instead of the scene.
 
 constexpr int kAudioMaxVoices = 256;
 
 void AudioDebugSetListener(AudioState *audio, Vec3 position, Vec3 forward, Vec3 up);
-void AudioDebugSetVoice(AudioState *audio, int slot, ClipId clip, Vec3 worldPos,
+void AudioDebugSetVoice(AudioState *audio, int slot, WavId clip, Vec3 worldPos,
                         AudioSourceParams params, double localTime, bool occluded);
 void AudioDebugClearVoices(AudioState *audio);
 

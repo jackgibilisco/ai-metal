@@ -1,10 +1,10 @@
 #pragma once
 
 // The editor's scene representation: fixed-capacity entity + component pools
-// in the arena, a shared entity/clip selection set, ray/AABB picking, and a
-// unified command/undo stack. Pure C++: no Metal, no AppKit. Renderer and
-// audio read the scene through the iteration helpers near the bottom; Remus's
-// gizmo and Dan's timeline push edits through SceneSubmitCommand.
+// in the arena, a shared entity/clip selection set, ray/AABB picking, and an
+// instance of the shared UndoStack. Pure C++: no Metal, no AppKit. Renderer
+// and audio read the scene through the iteration helpers near the bottom;
+// gizmo drags go through the typed operations below.
 
 #include <cstdint>
 
@@ -13,20 +13,19 @@
 #include "math3d.h"
 
 // ---------------------------------------------------------------------------
-// Capacities (locked in docs/scene-editor-plan.md; manager sign-off to change)
+// Fixed pool capacities
 // ---------------------------------------------------------------------------
 constexpr int kMaxEntities = 4096;
 constexpr int kMaxMeshRenderers = 4096;
 constexpr int kMaxAudioSources = 256;
 constexpr int kMaxAudioListeners = 16;
-constexpr int kMaxUndoCommands = 1024;    // ring buffer; oldest dropped on overflow
 constexpr int kMaxSelection = 5120;       // entities (4096) + clips (1024), combined
 constexpr int kMaxTransformEdits = 16384; // side ring backing multi-select transform undo
 
 // ---------------------------------------------------------------------------
 // Handles
 // ---------------------------------------------------------------------------
-// int32_t so it drops straight into the manager's / Andy's `int entity`
+// int32_t so it drops straight into an `int entity`
 // fields. Packed [30:12] generation | [11:0] slot. 0 is always invalid; a
 // live id has generation >= 1 so it is never 0. Compare by equality only.
 typedef int32_t EntityId;
@@ -46,8 +45,8 @@ enum MeshId {
     MeshId_Plane,
 };
 
-// Unscoped, underlying type int: Dan's toolbar writes through an `int*` alias,
-// Remus's gizmo reads it.
+// The active manipulation tool. The toolbar sets it via SceneSetToolMode; the
+// gizmo pass reads it via SceneToolMode.
 enum ToolMode {
     ToolMode_Select,
     ToolMode_Translate,
@@ -107,7 +106,7 @@ struct AudioListener {
 // ---------------------------------------------------------------------------
 enum SelectionKind {
     SelectionKind_Entity,
-    SelectionKind_Clip, // `id` is an opaque timeline-clip handle owned by Dan
+    SelectionKind_Clip, // `id` is an opaque timeline-clip handle
 };
 
 struct SelectionItem {
@@ -126,7 +125,7 @@ struct Selection {
 };
 
 // ---------------------------------------------------------------------------
-// Picking (Remus: gizmo/click pick + placement; Andy: listener->source occlusion)
+// Picking: gizmo/click pick, tool placement, listener->source occlusion
 // ---------------------------------------------------------------------------
 struct Ray {
     Vec3 origin;
@@ -140,33 +139,23 @@ struct PickResult {
 };
 
 // ---------------------------------------------------------------------------
-// Commands / undo — one generic variant everyone shares
+// Undo / redo
 // ---------------------------------------------------------------------------
-// The single command shape everyone shares. Dan's timeline ops and any other
-// module wrap their edit as `redo`/`undo` bodies over an opaque `payload` the
-// submitter allocates from the arena (session-only; an evicted command's
-// payload is simply forgotten, the undo ring holds 1024). Eric does not
-// extend a per-request enum. `tag` is informational only (inspection /
-// debugging); keep your own tags >= SceneCmdTag_UserBase.
-enum { SceneCmdTag_Internal = 0, SceneCmdTag_UserBase = 1000 };
-
-struct SceneCommand {
-    int tag;
-    void *payload;
-    void (*redo)(SceneState *scene, void *payload);
-    void (*undo)(SceneState *scene, void *payload);
-};
-
+// The history is a neutral UndoStack (src/undo_stack.h) the scene owns an
+// instance of. Scene edits go through the typed operations below; other
+// modules (the timeline) submit their own commands straight to the stack, so
+// one shared history spans entity and clip edits.
 struct SceneState; // opaque; defined in scene.cpp
+struct UndoStack;
 
-void SceneSubmitCommand(SceneState *scene, SceneCommand command); // runs redo + pushes
+UndoStack *SceneUndoStack(SceneState *scene);
 void SceneUndo(SceneState *scene);
 void SceneRedo(SceneState *scene);
 bool SceneCanUndo(const SceneState *scene);
 bool SceneCanRedo(const SceneState *scene);
 
 // ---------------------------------------------------------------------------
-// Typed operations (build a SceneCommand internally + submit; one undo step each)
+// Typed operations (each submits one command to the undo stack; one undo step each)
 // ---------------------------------------------------------------------------
 // Payloads come from a fixed scene-owned pool, not unbounded arena pushes.
 EntityId SceneCreateEntity(SceneState *scene, EntityKind kind, const char *name);
@@ -195,8 +184,8 @@ void SceneSetEntityTransform(SceneState *scene, EntityId id, Transform next);
 // Multi-select transform. Applies `delta` about a pivot to every selected
 // entity as ONE undoable command (one transform-edit range). Pivot = the
 // selection centroid (mean of selected entity world positions) unless
-// `useCentroidPivot` is false, then `pivot` is used. Purpose-built: gizmo
-// drags and non-drag callers both go through this, never the generic SceneCommand.
+// `useCentroidPivot` is false, then `pivot` is used. Gizmo drags and non-drag
+// callers both go through this.
 struct TransformDelta {
     Vec3 translate;
     Quat rotate;
@@ -204,12 +193,12 @@ struct TransformDelta {
     Vec3 pivot;
     bool useCentroidPivot;
 };
-void SceneMakeTransformSelection(SceneState *scene, TransformDelta delta); // build + submit
+void SceneTransformSelection(SceneState *scene, TransformDelta delta); // build + submit
 
 // Gizmo drag lifecycle: Begin snapshots every selected entity's transform;
 // Preview re-applies `delta` from that snapshot each frame with NO undo push
 // (live viewport preview); End re-applies and pushes exactly ONE command
-// covering the whole selection (same semantics as SceneMakeTransformSelection).
+// covering the whole selection (same semantics as SceneTransformSelection).
 // Calling End or Preview without a prior Begin is a no-op.
 void SceneBeginTransformDrag(SceneState *scene);
 void ScenePreviewTransformDrag(SceneState *scene, TransformDelta delta);
@@ -235,7 +224,7 @@ void SceneClear(SceneState *scene);
 SceneState *SceneInit(Arena *arena);
 
 // Per-frame hook. The default scene has no animation, so this returns false
-// today; kept so the manager can gate it on the transport clock later.
+// today; kept so app.cpp can gate it on the transport clock later.
 // Returns true if anything the renderer would draw changed.
 bool SceneUpdate(SceneState *scene, float simDeltaTime);
 
@@ -270,7 +259,7 @@ constexpr float kNonMeshPickHalfExtent = 0.3f;
 bool ScenePickRay(const SceneState *scene, Ray ray, PickResult *out);
 
 // Same, skipping `ignoreEntity` (pass kInvalidEntityId for none). This is the
-// single pick path for viewport clicks, gizmo/icon selection, and Andy's
+// single pick path for viewport clicks, gizmo/icon selection, and the
 // listener->source occlusion raycast (which excludes the source).
 bool ScenePickRayExcluding(const SceneState *scene, Ray ray, EntityId ignoreEntity,
                            PickResult *out);
@@ -312,7 +301,7 @@ struct SceneAudioListenerView {
 };
 int SceneAudioListeners(const SceneState *scene, SceneAudioListenerView *out, int maxOut);
 
-// Active listener (multiple allowed, exactly one active — decision 11).
+// Active listener (multiple allowed, exactly one active).
 // Returns false and leaves the out params untouched when there is none.
 // forward = rotation * (0,0,-1), up = rotation * (0,1,0).
 bool SceneActiveListener(const SceneState *scene, Vec3 *pos, Vec3 *forward, Vec3 *up);
@@ -320,13 +309,12 @@ EntityId SceneActiveListenerEntity(const SceneState *scene);
 void SceneSetActiveListener(SceneState *scene, EntityId listenerEntity);
 
 // Direct component/entity lookup by id (null / false if stale or missing).
-const Entity *SceneGetEntity(const SceneState *scene, EntityId id);
-bool SceneGetEntityTransform(const SceneState *scene, EntityId id, Transform *out);
-AudioSourceParams *SceneGetAudioSourceParams(SceneState *scene, EntityId id); // mutable, for inspector
+const Entity *SceneFindEntity(const SceneState *scene, EntityId id);
+bool SceneFindEntityTransform(const SceneState *scene, EntityId id, Transform *out);
+AudioSourceParams *SceneFindAudioSourceParams(SceneState *scene, EntityId id); // mutable, for inspector
 
 // ---------------------------------------------------------------------------
-// Tool mode (Dan's toolbar writes, Remus's gizmo reads)
+// Tool mode (the toolbar writes it, the gizmo reads it)
 // ---------------------------------------------------------------------------
 ToolMode SceneToolMode(const SceneState *scene);
 void SceneSetToolMode(SceneState *scene, ToolMode mode);
-int *SceneToolModePtr(SceneState *scene); // int alias for Dan's toolbar binding

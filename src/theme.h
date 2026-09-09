@@ -51,14 +51,14 @@ constexpr Color MenuDropdownBg = {38, 41, 46, 255};
 constexpr Color MenuItemHot = {70, 77, 90, 255};
 constexpr Color MenuSeparator = {70, 77, 90, 255};
 
-// ---- viewport / renderer (src/renderer_metal.mm - wired by the manager via a
+// ---- viewport / renderer (src/renderer_metal.mm - wired by app.cpp via a
 // shader-source #define prelude built from ToFloat) -----------------------
 constexpr Color ViewportBackground = {13, 13, 20, 255}; // void behind geometry
 constexpr Color GBufferClear = {0, 0, 0, 255};          // geometry-pass clear
 constexpr Color MeshBase = {226, 228, 233, 255};        // unselected mesh (white)
 constexpr Color MeshSelected = {74, 140, 242, 255};     // selected mesh (blue)
 
-// ---- gizmos and scene icons (src/renderer_metal.mm - Remus reads these
+// ---- gizmos and scene icons (src/renderer_metal.mm - the renderer reads these
 // names directly in the gizmo / icon pass) --------------------------------
 constexpr Color GizmoAxisX = {230, 72, 72, 255};
 constexpr Color GizmoAxisY = {96, 200, 88, 255};

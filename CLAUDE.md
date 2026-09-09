@@ -71,6 +71,7 @@ Layers by portability contract:
 | `src/ui_render_metal.mm` | Metal only | UI pipeline, glyph atlas, per-frame vertex buffer |
 | `src/platform_macos.mm` | the only AppKit file | `NSWindow`, `MTKView`+`CAMetalDisplayLink`, arena alloc, NSEvent -> `FrameInput`, native menu, per-frame present + commit |
 | `src/math3d.h` | header-only pure C++ | column-major `Vec3`/`Mat4`, layout matches MSL `float4x4` |
+| `src/undo_stack.h`/`.cpp` | pure C++, owned by no module | fixed-capacity undo/redo ring; stores each command's payload by value; scene and timeline both submit to one shared instance |
 | `src/frame_input.h`, `frame_stats.h` | dependency-free headers | portable input/timing structs |
 
 Full detail (pass chain, frame-loop pausing, menu routing, fullscreen path)

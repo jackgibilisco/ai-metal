@@ -27,9 +27,9 @@ constexpr float kMaxScaleFactor = 100.0f;
 
 Vec3 HandleAxis(GizmoHandle handle) {
     switch (handle) {
-        case GizmoHandle::AxisX: return Vec3{1.0f, 0.0f, 0.0f};
-        case GizmoHandle::AxisY: return Vec3{0.0f, 1.0f, 0.0f};
-        case GizmoHandle::AxisZ: return Vec3{0.0f, 0.0f, 1.0f};
+        case GizmoHandle_AxisX: return Vec3{1.0f, 0.0f, 0.0f};
+        case GizmoHandle_AxisY: return Vec3{0.0f, 1.0f, 0.0f};
+        case GizmoHandle_AxisZ: return Vec3{0.0f, 0.0f, 1.0f};
         default: return Vec3{0.0f, 0.0f, 0.0f};
     }
 }
@@ -228,13 +228,13 @@ float GizmoWorldScale(Vec3 pivot, Vec3 cameraEye, float fovYRadians,
 }
 
 GizmoHandle GizmoHitTest(ToolMode mode, Vec3 pivot, float scale, Ray ray) {
-    if (!ToolModeHasGizmo(mode)) return GizmoHandle::None;
+    if (!ToolModeHasGizmo(mode)) return GizmoHandle_None;
     Vec3 o = ray.origin;
     Vec3 d = ray.dir;
-    const GizmoHandle axisHandles[3] = {GizmoHandle::AxisX, GizmoHandle::AxisY, GizmoHandle::AxisZ};
+    const GizmoHandle axisHandles[3] = {GizmoHandle_AxisX, GizmoHandle_AxisY, GizmoHandle_AxisZ};
 
     if (mode == ToolMode_Rotate) {
-        GizmoHandle best = GizmoHandle::None;
+        GizmoHandle best = GizmoHandle_None;
         float bestError = kRingPickBand * scale;
         for (int i = 0; i < 3; ++i) {
             Vec3 normal = HandleAxis(axisHandles[i]);
@@ -253,11 +253,11 @@ GizmoHandle GizmoHitTest(ToolMode mode, Vec3 pivot, float scale, Ray ray) {
         Vec3 closest = ClosestRayPoint(o, d, pivot);
         float radius = kUniformPickRadius * scale;
         if (Vec3Dot(Vec3Sub(closest, pivot), Vec3Sub(closest, pivot)) <= radius * radius) {
-            return GizmoHandle::Uniform;
+            return GizmoHandle_Uniform;
         }
     }
 
-    GizmoHandle best = GizmoHandle::None;
+    GizmoHandle best = GizmoHandle_None;
     float bestT = 1e30f;
     float pickRadiusSq = (kAxisPickRadius * scale) * (kAxisPickRadius * scale);
     for (int i = 0; i < 3; ++i) {
@@ -285,7 +285,7 @@ GizmoDrag GizmoBeginDrag(ToolMode mode, GizmoHandle handle, Vec3 pivot, float sc
     Vec3 o = ray.origin;
     Vec3 d = ray.dir;
 
-    if (handle == GizmoHandle::Uniform) {
+    if (handle == GizmoHandle_Uniform) {
         drag.anchorPoint = ClosestRayPoint(o, d, pivot);
         return drag;
     }
@@ -328,7 +328,7 @@ TransformDelta GizmoUpdateDrag(GizmoDrag *drag, Ray ray) {
     Vec3 o = ray.origin;
     Vec3 d = ray.dir;
 
-    if (drag->handle == GizmoHandle::Uniform) {
+    if (drag->handle == GizmoHandle_Uniform) {
         Vec3 current = ClosestRayPoint(o, d, drag->pivot);
         float anchorDistance = Vec3Length(Vec3Sub(drag->anchorPoint, drag->pivot));
         float currentDistance = Vec3Length(Vec3Sub(current, drag->pivot));
@@ -358,9 +358,9 @@ TransformDelta GizmoUpdateDrag(GizmoDrag *drag, Ray ray) {
         float referenceLength = (drag->scale > 1e-4f) ? drag->scale : 1.0f;
         float factor = ClampScaleFactor(1.0f + displacement / referenceLength);
         Vec3 s = Vec3{1.0f, 1.0f, 1.0f};
-        if (drag->handle == GizmoHandle::AxisX) s.x = factor;
-        else if (drag->handle == GizmoHandle::AxisY) s.y = factor;
-        else if (drag->handle == GizmoHandle::AxisZ) s.z = factor;
+        if (drag->handle == GizmoHandle_AxisX) s.x = factor;
+        else if (drag->handle == GizmoHandle_AxisY) s.y = factor;
+        else if (drag->handle == GizmoHandle_AxisZ) s.z = factor;
         delta.scale = s;
         return delta;
     }
@@ -379,7 +379,7 @@ void GizmoBuild(GizmoMeshBuilder *out, ToolMode mode, Vec3 pivot, float scale,
                 GizmoHandle hovered, const GizmoColors &colors) {
     if (!ToolModeHasGizmo(mode)) return;
 
-    const GizmoHandle axisHandles[3] = {GizmoHandle::AxisX, GizmoHandle::AxisY, GizmoHandle::AxisZ};
+    const GizmoHandle axisHandles[3] = {GizmoHandle_AxisX, GizmoHandle_AxisY, GizmoHandle_AxisZ};
     const Vec3 axes[3] = {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
     const float *axisColors[3] = {colors.axisX, colors.axisY, colors.axisZ};
 
@@ -404,7 +404,7 @@ void GizmoBuild(GizmoMeshBuilder *out, ToolMode mode, Vec3 pivot, float scale,
     }
 
     if (mode == ToolMode_Scale) {
-        const float *color = (hovered == GizmoHandle::Uniform) ? colors.highlight : colors.uniform;
+        const float *color = (hovered == GizmoHandle_Uniform) ? colors.highlight : colors.uniform;
         BuildBox(out, pivot, kUniformBoxHalf * scale, color);
     }
 }

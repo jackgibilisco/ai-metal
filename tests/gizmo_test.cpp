@@ -92,46 +92,46 @@ static void TestWorldScale() {
 
 static void TestHitTestSelectIsNone() {
     Ray r = MakeRay(Vec3{0.5f, 0.0f, 5.0f}, Vec3{0.5f, 0.0f, 0.0f});
-    CHECK(GizmoHitTest(ToolMode_Select, kOrigin, 1.0f, r) == GizmoHandle::None);
+    CHECK(GizmoHitTest(ToolMode_Select, kOrigin, 1.0f, r) == GizmoHandle_None);
 }
 
 static void TestHitTestTranslateAxes() {
     // Straight down each axis handle from +Z.
     CHECK(GizmoHitTest(ToolMode_Translate, kOrigin, 1.0f,
-                       MakeRay(Vec3{0.5f, 0.0f, 5.0f}, Vec3{0.5f, 0.0f, 0.0f})) == GizmoHandle::AxisX);
+                       MakeRay(Vec3{0.5f, 0.0f, 5.0f}, Vec3{0.5f, 0.0f, 0.0f})) == GizmoHandle_AxisX);
     CHECK(GizmoHitTest(ToolMode_Translate, kOrigin, 1.0f,
-                       MakeRay(Vec3{0.0f, 0.5f, 5.0f}, Vec3{0.0f, 0.5f, 0.0f})) == GizmoHandle::AxisY);
+                       MakeRay(Vec3{0.0f, 0.5f, 5.0f}, Vec3{0.0f, 0.5f, 0.0f})) == GizmoHandle_AxisY);
     // Z handle: look along +X at a point on +Z.
     CHECK(GizmoHitTest(ToolMode_Translate, kOrigin, 1.0f,
-                       MakeRay(Vec3{5.0f, 0.0f, 0.5f}, Vec3{0.0f, 0.0f, 0.5f})) == GizmoHandle::AxisZ);
+                       MakeRay(Vec3{5.0f, 0.0f, 0.5f}, Vec3{0.0f, 0.0f, 0.5f})) == GizmoHandle_AxisZ);
     // Into empty space.
     CHECK(GizmoHitTest(ToolMode_Translate, kOrigin, 1.0f,
-                       MakeRay(Vec3{5.0f, 5.0f, 5.0f}, Vec3{5.0f, 5.0f, -5.0f})) == GizmoHandle::None);
+                       MakeRay(Vec3{5.0f, 5.0f, 5.0f}, Vec3{5.0f, 5.0f, -5.0f})) == GizmoHandle_None);
 }
 
 static void TestHitTestRotateRings() {
     // Ray hits z=0 plane at radius 1 -> the Z ring (XY plane).
     CHECK(GizmoHitTest(ToolMode_Rotate, kOrigin, 1.0f,
-                       MakeRay(Vec3{1.0f, 0.0f, 5.0f}, Vec3{1.0f, 0.0f, 0.0f})) == GizmoHandle::AxisZ);
+                       MakeRay(Vec3{1.0f, 0.0f, 5.0f}, Vec3{1.0f, 0.0f, 0.0f})) == GizmoHandle_AxisZ);
     // Ray hits x=0 plane at radius 1 -> the X ring (YZ plane).
     CHECK(GizmoHitTest(ToolMode_Rotate, kOrigin, 1.0f,
-                       MakeRay(Vec3{5.0f, 1.0f, 0.0f}, Vec3{0.0f, 1.0f, 0.0f})) == GizmoHandle::AxisX);
+                       MakeRay(Vec3{5.0f, 1.0f, 0.0f}, Vec3{0.0f, 1.0f, 0.0f})) == GizmoHandle_AxisX);
     // Well inside every ring -> no hit.
     CHECK(GizmoHitTest(ToolMode_Rotate, kOrigin, 1.0f,
-                       MakeRay(Vec3{0.1f, 0.0f, 5.0f}, Vec3{0.1f, 0.0f, 0.0f})) == GizmoHandle::None);
+                       MakeRay(Vec3{0.1f, 0.0f, 5.0f}, Vec3{0.1f, 0.0f, 0.0f})) == GizmoHandle_None);
 }
 
 static void TestHitTestScaleUniform() {
     // Ray through the pivot -> centre box.
     CHECK(GizmoHitTest(ToolMode_Scale, kOrigin, 1.0f,
-                       MakeRay(Vec3{0.0f, 0.0f, 5.0f}, kOrigin)) == GizmoHandle::Uniform);
+                       MakeRay(Vec3{0.0f, 0.0f, 5.0f}, kOrigin)) == GizmoHandle_Uniform);
     // Offset onto the X handle.
     CHECK(GizmoHitTest(ToolMode_Scale, kOrigin, 1.0f,
-                       MakeRay(Vec3{0.6f, 0.0f, 5.0f}, Vec3{0.6f, 0.0f, 0.0f})) == GizmoHandle::AxisX);
+                       MakeRay(Vec3{0.6f, 0.0f, 5.0f}, Vec3{0.6f, 0.0f, 0.0f})) == GizmoHandle_AxisX);
 }
 
 static void TestDragTranslate() {
-    GizmoDrag drag = GizmoBeginDrag(ToolMode_Translate, GizmoHandle::AxisX, kOrigin, 1.0f,
+    GizmoDrag drag = GizmoBeginDrag(ToolMode_Translate, GizmoHandle_AxisX, kOrigin, 1.0f,
                                     MakeRay(Vec3{0.0f, 0.0f, 5.0f}, kOrigin));
     TransformDelta d = GizmoUpdateDrag(&drag, MakeRay(Vec3{2.0f, 0.0f, 5.0f}, Vec3{2.0f, 0.0f, 0.0f}));
     CHECK_NEAR(d.translate.x, 2.0f, 1e-3f);
@@ -146,7 +146,7 @@ static void TestDragTranslate() {
 }
 
 static void TestDragRotate() {
-    GizmoDrag drag = GizmoBeginDrag(ToolMode_Rotate, GizmoHandle::AxisZ, kOrigin, 1.0f,
+    GizmoDrag drag = GizmoBeginDrag(ToolMode_Rotate, GizmoHandle_AxisZ, kOrigin, 1.0f,
                                     MakeRay(Vec3{1.0f, 0.0f, 5.0f}, Vec3{1.0f, 0.0f, 0.0f}));
     // Pointer sweeps from (1,0,0) to (0,1,0): +90 deg about +Z.
     TransformDelta d = GizmoUpdateDrag(&drag, MakeRay(Vec3{0.0f, 1.0f, 5.0f}, Vec3{0.0f, 1.0f, 0.0f}));
@@ -164,7 +164,7 @@ static void TestDragRotate() {
 }
 
 static void TestDragScaleAxis() {
-    GizmoDrag drag = GizmoBeginDrag(ToolMode_Scale, GizmoHandle::AxisY, kOrigin, 1.0f,
+    GizmoDrag drag = GizmoBeginDrag(ToolMode_Scale, GizmoHandle_AxisY, kOrigin, 1.0f,
                                     MakeRay(Vec3{0.0f, 0.0f, 5.0f}, kOrigin));
     // Move the pointer +1 along Y with scale reference length 1 -> factor 2.
     TransformDelta d = GizmoUpdateDrag(&drag, MakeRay(Vec3{0.0f, 1.0f, 5.0f}, Vec3{0.0f, 1.0f, 0.0f}));
@@ -174,7 +174,7 @@ static void TestDragScaleAxis() {
 }
 
 static void TestDragUniformScale() {
-    GizmoDrag drag = GizmoBeginDrag(ToolMode_Scale, GizmoHandle::Uniform, kOrigin, 1.0f,
+    GizmoDrag drag = GizmoBeginDrag(ToolMode_Scale, GizmoHandle_Uniform, kOrigin, 1.0f,
                                     MakeRay(Vec3{2.0f, 0.0f, 5.0f}, Vec3{2.0f, 0.0f, 0.0f}));
     TransformDelta d = GizmoUpdateDrag(&drag, MakeRay(Vec3{4.0f, 0.0f, 5.0f}, Vec3{4.0f, 0.0f, 0.0f}));
     CHECK_NEAR(d.scale.x, 2.0f, 1e-3f);
@@ -183,7 +183,7 @@ static void TestDragUniformScale() {
 }
 
 static void TestEndDragClearsActive() {
-    GizmoDrag drag = GizmoBeginDrag(ToolMode_Translate, GizmoHandle::AxisX, kOrigin, 1.0f,
+    GizmoDrag drag = GizmoBeginDrag(ToolMode_Translate, GizmoHandle_AxisX, kOrigin, 1.0f,
                                     MakeRay(Vec3{0.0f, 0.0f, 5.0f}, kOrigin));
     CHECK(drag.active);
     GizmoEndDrag(&drag, MakeRay(Vec3{1.0f, 0.0f, 5.0f}, Vec3{1.0f, 0.0f, 0.0f}));
@@ -218,23 +218,23 @@ static void TestBuildGeometry() {
     colors.highlight[3] = colors.uniform[3] = 1.0f;
 
     GizmoMeshBuilder b = {lines, 0, 4096, tris, 0, 4096};
-    GizmoBuild(&b, ToolMode_Select, kOrigin, 1.0f, GizmoHandle::None, colors);
+    GizmoBuild(&b, ToolMode_Select, kOrigin, 1.0f, GizmoHandle_None, colors);
     CHECK(b.lineCount == 0 && b.triCount == 0);
 
     b = GizmoMeshBuilder{lines, 0, 4096, tris, 0, 4096};
-    GizmoBuild(&b, ToolMode_Translate, kOrigin, 1.0f, GizmoHandle::AxisX, colors);
+    GizmoBuild(&b, ToolMode_Translate, kOrigin, 1.0f, GizmoHandle_AxisX, colors);
     CHECK(b.lineCount >= 6); // 3 axis shafts
     CHECK(b.triCount > 0);   // arrow heads
     // Hovered axis emitted in the highlight colour.
     CHECK_NEAR(b.lines[0].rgba[3], 1.0f, 1e-6f);
 
     b = GizmoMeshBuilder{lines, 0, 4096, tris, 0, 4096};
-    GizmoBuild(&b, ToolMode_Rotate, kOrigin, 1.0f, GizmoHandle::None, colors);
+    GizmoBuild(&b, ToolMode_Rotate, kOrigin, 1.0f, GizmoHandle_None, colors);
     CHECK(b.lineCount > 0);
     CHECK(b.triCount == 0);
 
     b = GizmoMeshBuilder{lines, 0, 4096, tris, 0, 4096};
-    GizmoBuild(&b, ToolMode_Scale, kOrigin, 1.0f, GizmoHandle::Uniform, colors);
+    GizmoBuild(&b, ToolMode_Scale, kOrigin, 1.0f, GizmoHandle_Uniform, colors);
     CHECK(b.lineCount > 0); // axis shafts + tip boxes + centre box
 }
 
@@ -252,16 +252,17 @@ static void TestBuildIcons() {
 
     GizmoMeshBuilder b = {lines, 0, 8192, tris, 0, 8192};
     GizmoBuildIcons(&b, &one, 1, Vec3{1, 0, 0}, Vec3{0, 1, 0}, 0.5f, colors);
-    CHECK(b.triCount == 6); // one billboard quad
-    CHECK(b.lineCount == 0);
+    CHECK(b.triCount == 9);   // body quad (6) + cone (3)
+    CHECK(b.lineCount == 26); // two arc waves
+    int unselectedLines = b.lineCount;
 
     one.selected = true;
     one.minDistance = 1.0f;
     one.maxDistance = 5.0f;
     b = GizmoMeshBuilder{lines, 0, 8192, tris, 0, 8192};
     GizmoBuildIcons(&b, &one, 1, Vec3{1, 0, 0}, Vec3{0, 1, 0}, 0.5f, colors);
-    CHECK(b.triCount == 6);
-    CHECK(b.lineCount > 8); // outline + two wireframe spheres
+    CHECK(b.triCount == 9); // selection does not add fill
+    CHECK(b.lineCount == unselectedLines + 8 + 2 * 288); // 4-seg outline + two wire spheres
 }
 
 static void TestOverflowClamped() {
@@ -269,7 +270,7 @@ static void TestOverflowClamped() {
     GizmoVertex tris[8];
     GizmoColors colors = {};
     GizmoMeshBuilder b = {lines, 0, 8, tris, 0, 8};
-    GizmoBuild(&b, ToolMode_Rotate, kOrigin, 1.0f, GizmoHandle::None, colors);
+    GizmoBuild(&b, ToolMode_Rotate, kOrigin, 1.0f, GizmoHandle_None, colors);
     CHECK(b.lineCount <= 8);
     CHECK(b.triCount <= 8);
 }

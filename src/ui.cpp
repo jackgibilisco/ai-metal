@@ -756,13 +756,13 @@ void UpdatePanelInteraction(UiState *ui) {
 struct ToolButtonDef {
     const char *label;
     const char *shortcut; // shown in the hover tooltip
-    int modeValue;        // value written into *editor.toolMode
+    ToolMode mode;        // tool mode this button selects
 };
 
 const ToolButtonDef kToolButtons[] = {
-    {"Move", "1", UiTool_Translate},
-    {"Rotate", "2", UiTool_Rotate},
-    {"Scale", "3", UiTool_Scale},
+    {"Move", "1", ToolMode_Translate},
+    {"Rotate", "2", ToolMode_Rotate},
+    {"Scale", "3", ToolMode_Scale},
 };
 constexpr int kToolButtonCount = (int)(sizeof(kToolButtons) / sizeof(kToolButtons[0]));
 
@@ -773,7 +773,7 @@ constexpr float kToolButtonGap = 4.0f;
 constexpr float kToolbarInsetY = 6.0f;
 
 bool ToolButtonOn(const ToolButtonDef &def, const UiEditorState *e) {
-    return e->toolMode != nullptr && *e->toolMode == def.modeValue;
+    return e->scene != nullptr && SceneToolMode(e->scene) == def.mode;
 }
 
 bool ToolButtonWidget(UiState *ui, int id, Rect r, const char *label, bool on) {
@@ -887,7 +887,7 @@ void PushClippedRect(UiState *ui, Rect r, float clipX0, float clipX1, Color c) {
 
 EntityId SelectedAudioSource(const SceneState *scene) {
     EntityId active = SceneSelection(scene).activeEntity;
-    const Entity *entity = SceneGetEntity(scene, active);
+    const Entity *entity = SceneFindEntity(scene, active);
     if (entity != nullptr && entity->kind == EntityKind_AudioSource) {
         return active;
     }
@@ -983,13 +983,11 @@ void DrawTimelineLanes(UiState *ui, const TimelineLayout &layout) {
 
 void BuildTimelineClips(UiState *ui, TimelineState *timeline, SceneState *scene,
                         const TimelineLayout &layout) {
-    int clipCount = TimelineClipCount(timeline);
+    static TimelineClipRow clipRows[kMaxTimelineClips];
+    int clipCount = TimelineClips(timeline, clipRows, kMaxTimelineClips);
     for (int i = 0; i < clipCount; ++i) {
-        TimelineClipId id = kInvalidTimelineClipId;
-        TimelineClip clip;
-        if (!TimelineClipAt(timeline, i, &id, &clip)) {
-            continue;
-        }
+        TimelineClipId id = clipRows[i].id;
+        const TimelineClip &clip = clipRows[i].clip;
         int lane = TimelineLaneOfTrack(layout, clip.track);
         if (lane < 0) {
             continue;
@@ -1066,14 +1064,14 @@ void BuildTimelineClips(UiState *ui, TimelineState *timeline, SceneState *scene,
 
         if (dragging && ui->mouseReleased) {
             if (ui->timelineDragMode == TimelineDrag_Move) {
-                TimelineSubmitMoveClip(timeline, scene, id, layout.laneTracks[drawLane], startTime);
+                TimelineMoveClip(timeline, scene, id, layout.laneTracks[drawLane], startTime);
             } else if (ui->timelineDragMode == TimelineDrag_TrimRight) {
                 double trimmed = ui->timelineDragDuration - duration;
-                TimelineSubmitTrimClip(timeline, scene, id, ui->timelineDragTrimIn,
+                TimelineTrimClip(timeline, scene, id, ui->timelineDragTrimIn,
                                        ui->timelineDragTrimOut + trimmed, duration);
             } else {
                 double shift = startTime - ui->timelineDragStartTime;
-                TimelineSubmitTrimClip(timeline, scene, id, ui->timelineDragTrimIn + shift,
+                TimelineTrimClip(timeline, scene, id, ui->timelineDragTrimIn + shift,
                                        ui->timelineDragTrimOut, duration);
             }
             ui->timelineDragClip = kInvalidTimelineClipId;
@@ -1140,19 +1138,19 @@ void HandleTimelineDrop(UiState *ui, FrameInput input, const TimelineLayout &lay
     double dropTime = TimelineXToTime(layout, input.dropX);
 
     for (int i = 0; i < input.droppedFileCount; ++i) {
-        ClipId wav = AudioLoadClip(ui->editor.audio, input.droppedFiles[i]);
-        if (!ClipIdValid(wav)) {
+        WavId wav = AudioLoadWav(ui->editor.audio, input.droppedFiles[i]);
+        if (!WavIdValid(wav)) {
             continue;
         }
         if (track == kInvalidTrackId) {
-            track = TimelineSubmitAddTrack(ui->editor.timeline, ui->editor.scene,
+            track = TimelineAddTrack(ui->editor.timeline, ui->editor.scene,
                                            SelectedAudioSource(ui->editor.scene), "Track");
             if (track == kInvalidTrackId) {
                 return;
             }
         }
-        double duration = AudioClipDuration(ui->editor.audio, wav);
-        TimelineSubmitCreateClip(ui->editor.timeline, ui->editor.scene, track, wav, dropTime,
+        double duration = AudioWavDuration(ui->editor.audio, wav);
+        TimelineAddClip(ui->editor.timeline, ui->editor.scene, track, wav, dropTime,
                                  duration);
         dropTime += duration;
     }
@@ -1171,7 +1169,8 @@ void BuildTimelineBody(UiState *ui, FrameInput input) {
         return;
     }
 
-    int trackCount = TimelineTrackCount(timeline);
+    static TimelineTrackRow trackRows[kMaxTimelineTracks];
+    int trackCount = TimelineTracks(timeline, trackRows, kMaxTimelineTracks);
     float lanesViewH = (body.y + body.h) - lanesTop;
     float lanesFullH = (float)trackCount * kTimelineLaneHeight;
     float maxLaneScroll = lanesFullH > lanesViewH ? lanesFullH - lanesViewH : 0.0f;
@@ -1223,7 +1222,8 @@ void BuildTimelineBody(UiState *ui, FrameInput input) {
     }
     layout.laneCount = trackCount < visibleLanes ? trackCount : visibleLanes;
     for (int i = 0; i < layout.laneCount; ++i) {
-        TimelineTrackAt(timeline, i, &layout.laneTracks[i], &layout.laneInfo[i]);
+        layout.laneTracks[i] = trackRows[i].id;
+        layout.laneInfo[i] = trackRows[i].track;
     }
 
     BuildTimelineTransport(ui, timeline, {body.x, body.y, body.w, kTimelineTransportHeight});
@@ -1462,8 +1462,8 @@ void BuildToolbar(UiState *ui) {
         penX += widths[i] + kToolButtonGap;
         int buttonId = 700000 + i;
         bool on = ToolButtonOn(def, &ui->editor);
-        if (ToolButtonWidget(ui, buttonId, r, def.label, on) && ui->editor.toolMode != nullptr) {
-            *ui->editor.toolMode = def.modeValue;
+        if (ToolButtonWidget(ui, buttonId, r, def.label, on) && ui->editor.scene != nullptr) {
+            SceneSetToolMode(ui->editor.scene, def.mode);
         }
         if (ui->hotId == buttonId) {
             DrawToolTooltip(ui, r, def.label, def.shortcut);

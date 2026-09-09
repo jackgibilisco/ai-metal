@@ -71,32 +71,18 @@ void UiSetMarquee(UiState *ui, bool active, float x0, float y0, float x1, float 
 // Reading it clears it.
 CommandId UiTakeCommand(UiState *ui);
 
-// 3D-editor toolbar. The app owns the editor's tool mode, the snap flag, and
-// the placement actions (Remus's add-source / add-listener, frame-selected). It
-// hands pointers + callbacks to the UI once per frame via UiSetEditorState,
-// before UiBuildFrame. Any field left null makes its button inert, so the
-// toolbar still builds before the scene module is wired.
-//
-// The tool-mode values mirror the scene module's tool-mode enum; the toolbar
-// only ever writes one of these into *toolMode.
-enum {
-    UiTool_Select = 0,
-    UiTool_Translate,
-    UiTool_Rotate,
-    UiTool_Scale,
-};
-
+// 3D-editor toolbar + panel bindings. The app hands these to the UI once per
+// frame via UiSetEditorState, before UiBuildFrame. Any pointer left null makes
+// the controls that need it inert, so the UI still builds before the modules
+// are wired. The toolbar reads and writes the tool mode straight through
+// `scene` (SceneToolMode / SceneSetToolMode).
 struct TimelineState;
 struct SceneState;
 struct AudioState;
 
 struct UiEditorState {
-    int *toolMode;       // scene-owned tool-mode enum; the tool buttons set it
     bool requestAddMenu; // app raises this for one frame (the 'n' key) to open
                          // the outliner's add-kind dropdown
-
-    // Scene + timeline bindings. Null until the modules are wired; the panels
-    // then read/draw them and submit undoable edits.
     TimelineState *timeline;
     SceneState *scene;
     AudioState *audio;

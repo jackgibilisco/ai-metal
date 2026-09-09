@@ -122,7 +122,7 @@ void UpdateViewportInteraction(AppState *appState, FrameInput input) {
             appState->gizmoPivot = Vec3Add(appState->gizmoDrag.pivot, delta.translate);
         } else {
             SceneEndTransformDrag(scene, GizmoEndDrag(&appState->gizmoDrag, ray));
-            appState->activeHandle = GizmoHandle::None;
+            appState->activeHandle = GizmoHandle_None;
         }
         appState->forcedRenderFrames = 3;
         return;
@@ -151,14 +151,14 @@ void UpdateViewportInteraction(AppState *appState, FrameInput input) {
     appState->gizmoPivot = SceneSelectionCentroid(scene);
 
     if (UiWantsMouse(appState->ui)) {
-        appState->hoveredHandle = GizmoHandle::None;
+        appState->hoveredHandle = GizmoHandle_None;
         return;
     }
 
     float scale = RendererGizmoScale(appState->renderer, appState->gizmoPivot);
     GizmoHandle handle = appState->gizmoVisible
                              ? GizmoHitTest(toolMode, appState->gizmoPivot, scale, ray)
-                             : GizmoHandle::None;
+                             : GizmoHandle_None;
 
     if (!leftDown && handle != appState->hoveredHandle) {
         appState->hoveredHandle = handle;
@@ -169,7 +169,7 @@ void UpdateViewportInteraction(AppState *appState, FrameInput input) {
         return;
     }
 
-    if (handle != GizmoHandle::None) {
+    if (handle != GizmoHandle_None) {
         SceneBeginTransformDrag(scene);
         appState->gizmoDrag = GizmoBeginDrag(toolMode, handle, appState->gizmoPivot, scale, ray);
         appState->activeHandle = handle;
@@ -191,7 +191,6 @@ void UpdateViewportInteraction(AppState *appState, FrameInput input) {
 
 void PublishEditorState(AppState *appState) {
     UiEditorState editor = {};
-    editor.toolMode = SceneToolModePtr(appState->scene);
     editor.requestAddMenu = appState->addMenuRequested;
     editor.timeline = appState->timeline;
     editor.scene = appState->scene;

@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+#include "undo_stack.h"
+
 // ---------------------------------------------------------------------------
 // Handle packing: EntityId = [30:12] generation | [11:0] slot. 0 is invalid;
 // a live id always has generation >= 1.
@@ -32,18 +34,9 @@ void CopyName(char *dst, const char *src) {
 } // namespace
 
 // ---------------------------------------------------------------------------
-// SceneCommand payloads. One PayloadStorage rides in each undo-ring slot, so no
-// separate allocator: overwriting a command reuses its payload slot.
+// Undo-command payloads. Each typed operation fills one arm of PayloadStorage
+// and hands it to the undo stack, which stores it by value in the ring slot.
 // ---------------------------------------------------------------------------
-enum {
-    SceneCmdTag_Create = 1,
-    SceneCmdTag_Delete,
-    SceneCmdTag_MultiDelete,
-    SceneCmdTag_SetTransform,
-    SceneCmdTag_TransformSelection,
-    SceneCmdTag_Rename,
-};
-
 struct PayloadCreate {
     EntityKind kind;
     char name[64];
@@ -103,7 +96,7 @@ struct TransformEdit {
 // ---------------------------------------------------------------------------
 struct SceneState {
     Arena *arena;
-    int toolMode; // ToolMode; stored as int so SceneToolModePtr can alias it
+    ToolMode toolMode;
 
     // Entity pool: sparse, indexed by slot. Free slots live on a stack.
     Entity entities[kMaxEntities];
@@ -127,12 +120,9 @@ struct SceneState {
     int selectionCount;
     EntityId activeEntity;
 
-    // Unified undo ring.
-    SceneCommand commands[kMaxUndoCommands];
-    PayloadStorage payloads[kMaxUndoCommands];
-    int commandBase;   // ring index of the oldest stored command
-    int commandCount;  // stored commands from base (done + available-for-redo)
-    int commandCursor; // how many of those are currently applied
+    // Shared undo/redo history (spans entity edits here and clip edits in the
+    // timeline). Owned here; other modules reach it via SceneUndoStack.
+    UndoStack *undo;
 
     // Side ring feeding multi-select transform undo.
     TransformEdit transformEdits[kMaxTransformEdits];
@@ -670,38 +660,19 @@ bool ScenePickRay(const SceneState *scene, Ray ray, PickResult *out) {
 }
 
 // ---------------------------------------------------------------------------
-// SceneCommand stack
+// Undo commands. Each handler casts the shared context back to SceneState and
+// reads its typed payload out of the union.
 // ---------------------------------------------------------------------------
 namespace {
 
-int PushCommand(SceneState *scene, SceneCommand command) {
-    scene->commandCount = scene->commandCursor; // discard any redo branch
-    if (scene->commandCount == kMaxUndoCommands) {
-        scene->commandBase = (scene->commandBase + 1) % kMaxUndoCommands;
-        --scene->commandCount;
-    }
-    int slot = (scene->commandBase + scene->commandCount) % kMaxUndoCommands;
-    scene->commands[slot] = command;
-    ++scene->commandCount;
-    scene->commandCursor = scene->commandCount;
-    return slot;
-}
-
-int SubmitTyped(SceneState *scene, int tag, void (*redo)(SceneState *, void *),
-                void (*undo)(SceneState *, void *), const PayloadStorage &payload) {
-    SceneCommand command = {};
-    command.tag = tag;
-    command.redo = redo;
-    command.undo = undo;
-    int slot = PushCommand(scene, command);
-    scene->payloads[slot] = payload;
-    scene->commands[slot].payload = &scene->payloads[slot];
-    scene->commands[slot].redo(scene, scene->commands[slot].payload);
-    return slot;
+void *SubmitTyped(SceneState *scene, UndoStackFn redo, UndoStackFn undo,
+                  const PayloadStorage &payload) {
+    return UndoStackSubmit(scene->undo, redo, undo, &payload, sizeof payload);
 }
 
 // --- create ---
-void RedoCreate(SceneState *scene, void *raw) {
+void RedoCreate(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadCreate *p = (PayloadCreate *)raw;
     p->result = EntityAlloc(scene, p->kind, p->name, p->transform);
     if (p->kind == EntityKind_Mesh && p->mesh != MeshId_Cube) {
@@ -714,20 +685,23 @@ void RedoCreate(SceneState *scene, void *raw) {
         }
     }
 }
-void UndoCreate(SceneState *scene, void *raw) {
+void UndoCreate(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadCreate *p = (PayloadCreate *)raw;
     EntityDestroy(scene, p->result);
 }
 
 // --- rename ---
-void RedoRename(SceneState *scene, void *raw) {
+void RedoRename(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadRename *p = (PayloadRename *)raw;
     Entity *entity = EntityMut(scene, p->id);
     if (entity != nullptr) {
         CopyName(entity->name, p->after);
     }
 }
-void UndoRename(SceneState *scene, void *raw) {
+void UndoRename(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadRename *p = (PayloadRename *)raw;
     Entity *entity = EntityMut(scene, p->id);
     if (entity != nullptr) {
@@ -755,23 +729,27 @@ void SnapshotForDelete(SceneState *scene, EntityId id, PayloadDelete *p) {
     }
     p->wasActiveListener = (scene->activeListener == id);
 }
-void RedoDelete(SceneState *scene, void *raw) {
+void RedoDelete(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadDelete *p = (PayloadDelete *)raw;
     EntityDestroy(scene, p->id);
 }
-void UndoDelete(SceneState *scene, void *raw) {
+void UndoDelete(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadDelete *p = (PayloadDelete *)raw;
     EntityRestore(scene, p);
 }
 
 // --- multi-delete (one command over a whole selection) ---
-void RedoMultiDelete(SceneState *scene, void *raw) {
+void RedoMultiDelete(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadMultiDelete *p = (PayloadMultiDelete *)raw;
     for (uint32_t i = 0; i < p->count; ++i) {
         EntityDestroy(scene, scene->deleteSnapshots[(p->start + i) % kMaxEntities].id);
     }
 }
-void UndoMultiDelete(SceneState *scene, void *raw) {
+void UndoMultiDelete(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadMultiDelete *p = (PayloadMultiDelete *)raw;
     for (uint32_t i = 0; i < p->count; ++i) {
         EntityRestore(scene, &scene->deleteSnapshots[(p->start + i) % kMaxEntities]);
@@ -779,14 +757,16 @@ void UndoMultiDelete(SceneState *scene, void *raw) {
 }
 
 // --- set transform (single) ---
-void RedoSetTransform(SceneState *scene, void *raw) {
+void RedoSetTransform(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadSetTransform *p = (PayloadSetTransform *)raw;
     Entity *entity = EntityMut(scene, p->id);
     if (entity != nullptr) {
         entity->transform = p->after;
     }
 }
-void UndoSetTransform(SceneState *scene, void *raw) {
+void UndoSetTransform(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadSetTransform *p = (PayloadSetTransform *)raw;
     Entity *entity = EntityMut(scene, p->id);
     if (entity != nullptr) {
@@ -804,11 +784,13 @@ void ApplyTransformEditRange(SceneState *scene, uint32_t start, uint32_t count, 
         }
     }
 }
-void RedoTransformSelection(SceneState *scene, void *raw) {
+void RedoTransformSelection(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadTransformSelection *p = (PayloadTransformSelection *)raw;
     ApplyTransformEditRange(scene, p->editStart, p->editCount, true);
 }
-void UndoTransformSelection(SceneState *scene, void *raw) {
+void UndoTransformSelection(void *context, void *raw) {
+    SceneState *scene = (SceneState *)context;
     PayloadTransformSelection *p = (PayloadTransformSelection *)raw;
     ApplyTransformEditRange(scene, p->editStart, p->editCount, false);
 }
@@ -845,7 +827,7 @@ void SubmitTransformEdits(SceneState *scene, const EntityId *ids, const Transfor
     PayloadStorage payload = {};
     payload.transformSelection.editStart = start;
     payload.transformSelection.editCount = (uint32_t)count;
-    SubmitTyped(scene, SceneCmdTag_TransformSelection, RedoTransformSelection, UndoTransformSelection,
+    SubmitTyped(scene, RedoTransformSelection, UndoTransformSelection,
                 payload);
 }
 
@@ -876,37 +858,11 @@ Vec3 PivotFor(const SceneState *scene, TransformDelta delta, const EntityId *ids
 
 } // namespace
 
-void SceneSubmitCommand(SceneState *scene, SceneCommand command) {
-    int slot = PushCommand(scene, command);
-    if (scene->commands[slot].redo != nullptr) {
-        scene->commands[slot].redo(scene, scene->commands[slot].payload);
-    }
-}
-
-void SceneUndo(SceneState *scene) {
-    if (scene->commandCursor == 0) {
-        return;
-    }
-    --scene->commandCursor;
-    SceneCommand *command = &scene->commands[(scene->commandBase + scene->commandCursor) % kMaxUndoCommands];
-    if (command->undo != nullptr) {
-        command->undo(scene, command->payload);
-    }
-}
-
-void SceneRedo(SceneState *scene) {
-    if (scene->commandCursor >= scene->commandCount) {
-        return;
-    }
-    SceneCommand *command = &scene->commands[(scene->commandBase + scene->commandCursor) % kMaxUndoCommands];
-    if (command->redo != nullptr) {
-        command->redo(scene, command->payload);
-    }
-    ++scene->commandCursor;
-}
-
-bool SceneCanUndo(const SceneState *scene) { return scene->commandCursor > 0; }
-bool SceneCanRedo(const SceneState *scene) { return scene->commandCursor < scene->commandCount; }
+UndoStack *SceneUndoStack(SceneState *scene) { return scene->undo; }
+void SceneUndo(SceneState *scene) { UndoStackUndo(scene->undo); }
+void SceneRedo(SceneState *scene) { UndoStackRedo(scene->undo); }
+bool SceneCanUndo(const SceneState *scene) { return UndoStackCanUndo(scene->undo); }
+bool SceneCanRedo(const SceneState *scene) { return UndoStackCanRedo(scene->undo); }
 
 // ---------------------------------------------------------------------------
 // Typed operations
@@ -918,8 +874,8 @@ EntityId SceneCreateEntityAt(SceneState *scene, EntityKind kind, const char *nam
     CopyName(payload.create.name, name);
     payload.create.transform = transform;
     payload.create.result = kInvalidEntityId;
-    int slot = SubmitTyped(scene, SceneCmdTag_Create, RedoCreate, UndoCreate, payload);
-    return ((PayloadCreate *)scene->commands[slot].payload)->result;
+    PayloadCreate *stored = (PayloadCreate *)SubmitTyped(scene, RedoCreate, UndoCreate, payload);
+    return stored->result;
 }
 
 EntityId SceneCreateEntity(SceneState *scene, EntityKind kind, const char *name) {
@@ -934,8 +890,8 @@ EntityId SceneCreateMeshEntityAt(SceneState *scene, const char *name, MeshId mes
     payload.create.transform = transform;
     payload.create.mesh = mesh;
     payload.create.result = kInvalidEntityId;
-    int slot = SubmitTyped(scene, SceneCmdTag_Create, RedoCreate, UndoCreate, payload);
-    return ((PayloadCreate *)scene->commands[slot].payload)->result;
+    PayloadCreate *stored = (PayloadCreate *)SubmitTyped(scene, RedoCreate, UndoCreate, payload);
+    return stored->result;
 }
 
 void SceneRenameEntity(SceneState *scene, EntityId id, const char *name) {
@@ -947,7 +903,7 @@ void SceneRenameEntity(SceneState *scene, EntityId id, const char *name) {
     payload.rename.id = id;
     CopyName(payload.rename.before, entity->name);
     CopyName(payload.rename.after, name);
-    SubmitTyped(scene, SceneCmdTag_Rename, RedoRename, UndoRename, payload);
+    SubmitTyped(scene, RedoRename, UndoRename, payload);
 }
 
 void SceneDeleteEntity(SceneState *scene, EntityId id) {
@@ -956,7 +912,7 @@ void SceneDeleteEntity(SceneState *scene, EntityId id) {
     }
     PayloadStorage payload = {};
     SnapshotForDelete(scene, id, &payload.del);
-    SubmitTyped(scene, SceneCmdTag_Delete, RedoDelete, UndoDelete, payload);
+    SubmitTyped(scene, RedoDelete, UndoDelete, payload);
 }
 
 void SceneSetEntityTransform(SceneState *scene, EntityId id, Transform next) {
@@ -968,7 +924,7 @@ void SceneSetEntityTransform(SceneState *scene, EntityId id, Transform next) {
     payload.setTransform.id = id;
     payload.setTransform.before = entity->transform;
     payload.setTransform.after = next;
-    SubmitTyped(scene, SceneCmdTag_SetTransform, RedoSetTransform, UndoSetTransform, payload);
+    SubmitTyped(scene, RedoSetTransform, UndoSetTransform, payload);
 }
 
 void SceneDeleteSelection(SceneState *scene) {
@@ -987,12 +943,12 @@ void SceneDeleteSelection(SceneState *scene) {
     PayloadStorage payload = {};
     payload.multiDelete.start = start;
     payload.multiDelete.count = (uint32_t)count;
-    SubmitTyped(scene, SceneCmdTag_MultiDelete, RedoMultiDelete, UndoMultiDelete, payload);
+    SubmitTyped(scene, RedoMultiDelete, UndoMultiDelete, payload);
 
     SceneSelectionClear(scene);
 }
 
-void SceneMakeTransformSelection(SceneState *scene, TransformDelta delta) {
+void SceneTransformSelection(SceneState *scene, TransformDelta delta) {
     EntityId ids[kMaxEntities];
     int count = GatherSelectedEntities(scene, ids, kMaxEntities);
     if (count == 0) {
@@ -1079,9 +1035,7 @@ void SceneClear(SceneState *scene) {
     scene->activeListener = kInvalidEntityId;
     scene->selectionCount = 0;
     scene->activeEntity = kInvalidEntityId;
-    scene->commandBase = 0;
-    scene->commandCount = 0;
-    scene->commandCursor = 0;
+    UndoStackClear(scene->undo);
     scene->transformEditHead = 0;
     scene->dragActive = false;
     scene->dragCount = 0;
@@ -1117,6 +1071,7 @@ SceneState *SceneInit(Arena *arena) {
     SceneState *scene = ArenaPushStruct(arena, SceneState);
     scene->arena = arena;
     scene->toolMode = ToolMode_Translate;
+    scene->undo = UndoStackInit(arena, scene);
     scene->activeListener = kInvalidEntityId;
     scene->activeEntity = kInvalidEntityId;
 
@@ -1218,9 +1173,9 @@ void SceneSetActiveListener(SceneState *scene, EntityId listenerEntity) {
     }
 }
 
-const Entity *SceneGetEntity(const SceneState *scene, EntityId id) { return EntityConst(scene, id); }
+const Entity *SceneFindEntity(const SceneState *scene, EntityId id) { return EntityConst(scene, id); }
 
-bool SceneGetEntityTransform(const SceneState *scene, EntityId id, Transform *out) {
+bool SceneFindEntityTransform(const SceneState *scene, EntityId id, Transform *out) {
     const Entity *entity = EntityConst(scene, id);
     if (entity == nullptr) {
         return false;
@@ -1229,7 +1184,7 @@ bool SceneGetEntityTransform(const SceneState *scene, EntityId id, Transform *ou
     return true;
 }
 
-AudioSourceParams *SceneGetAudioSourceParams(SceneState *scene, EntityId id) {
+AudioSourceParams *SceneFindAudioSourceParams(SceneState *scene, EntityId id) {
     Entity *entity = EntityMut(scene, id);
     if (entity == nullptr || entity->kind != EntityKind_AudioSource ||
         entity->component == kNoComponent) {
@@ -1241,6 +1196,5 @@ AudioSourceParams *SceneGetAudioSourceParams(SceneState *scene, EntityId id) {
 // ---------------------------------------------------------------------------
 // Tool mode
 // ---------------------------------------------------------------------------
-ToolMode SceneToolMode(const SceneState *scene) { return (ToolMode)scene->toolMode; }
-void SceneSetToolMode(SceneState *scene, ToolMode mode) { scene->toolMode = (int)mode; }
-int *SceneToolModePtr(SceneState *scene) { return &scene->toolMode; }
+ToolMode SceneToolMode(const SceneState *scene) { return scene->toolMode; }
+void SceneSetToolMode(SceneState *scene, ToolMode mode) { scene->toolMode = mode; }
