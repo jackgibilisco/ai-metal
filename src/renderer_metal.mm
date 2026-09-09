@@ -45,7 +45,7 @@ constexpr float kMaxCameraPitch = 1.5f; // radians; keeps the view short of the 
 constexpr float kAoRadius = 0.6f;
 constexpr float kAoBias = 0.025f;
 constexpr float kAoPower = 1.6f;
-constexpr int kAoKernelSize = 16;
+constexpr int kAoKernelSize = 32;
 constexpr int kAoNoiseSize = 4;
 
 const Vec3 kLightDirectionWorld = {0.4f, 1.0f, 0.6f};
@@ -130,7 +130,7 @@ const char *kShaderSource = R"(
 #include <metal_stdlib>
 using namespace metal;
 
-constant int kKernelSize = 16;
+constant int kKernelSize = 32;
 
 struct VertexIn {
     float3 position [[attribute(0)]];
@@ -219,12 +219,18 @@ fragment float ao_fragment(FullscreenOut in [[stage_in]],
     float3 normal = normalize(normalSample.xyz);
 
     float2 noiseScale = params.params1.xy / float(4.0);
-    float3 randomVec = normalize(noiseTexture.sample(noiseSampler, in.uv * noiseScale).xyz);
+    float4 noiseSample = noiseTexture.sample(noiseSampler, in.uv * noiseScale);
+    float3 randomVec = normalize(noiseSample.xyz);
     float3 tangent = normalize(randomVec - normal * dot(randomVec, normal));
     float3 bitangent = cross(normal, tangent);
     float3x3 tangentToView = float3x3(tangent, bitangent, normal);
 
-    float radius = params.params0.x;
+    // Jitters the whole kernel's radius per pixel so a flat, uniformly-angled
+    // surface (e.g. the ground plane) doesn't self-occlude at the kernel's
+    // fixed sample distances identically everywhere, which reads as
+    // concentric banding instead of noise. The 4x4 noise tile repeats this
+    // jitter at a fine period; the lighting pass's box blur smooths it out.
+    float radius = params.params0.x * (0.75 + 0.5 * noiseSample.w);
     float bias = params.params0.y;
     float occlusion = 0.0;
     for (int i = 0; i < kKernelSize; ++i) {
@@ -571,7 +577,7 @@ id<MTLTexture> BuildNoiseTexture(id<MTLDevice> device) {
         texels[i * 4 + 0] = RandomUnit() * 2.0f - 1.0f;
         texels[i * 4 + 1] = RandomUnit() * 2.0f - 1.0f;
         texels[i * 4 + 2] = 0.0f;
-        texels[i * 4 + 3] = 0.0f;
+        texels[i * 4 + 3] = RandomUnit();
     }
 
     MTLTextureDescriptor *descriptor =
