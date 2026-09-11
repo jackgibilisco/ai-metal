@@ -44,6 +44,7 @@ constexpr float kMouseWheelZoom = 0.05f;
 // in renderIntoDrawable:, which resets them.
 constexpr int kMaxDroppedFiles = 16;
 constexpr int kMaxDropPathLength = 1024;
+constexpr unsigned short kKeyCodeF3 = 99;
 
 @interface AppMetalView : MTKView
 @property(nonatomic) float pendingPanX;
@@ -51,9 +52,8 @@ constexpr int kMaxDropPathLength = 1024;
 @property(nonatomic) float pendingZoom;
 @property(nonatomic) float pendingOrbitYaw;
 @property(nonatomic) float pendingOrbitPitch;
-@property(nonatomic) BOOL pendingCycleDebug;
-@property(nonatomic) BOOL pendingToggleFxaa;
-@property(nonatomic) BOOL pendingToggleHud;
+@property(nonatomic) float pendingMagnification;
+@property(nonatomic) BOOL f3Down; // held chord prefix for the debug shortcuts
 @property(nonatomic) float pendingMouseX; // backing pixels, top-left origin
 @property(nonatomic) float pendingMouseY;
 @property(nonatomic) BOOL pendingMouseLeftDown;
@@ -103,12 +103,18 @@ constexpr int kMaxDropPathLength = 1024;
     }
     NSString *chars = event.charactersIgnoringModifiers;
     unsigned int codepoint = chars.length > 0 ? [chars characterAtIndex:0] : 0;
+    if (codepoint >= 0xF700) {
+        codepoint = 0; // function/arrow keys have no character
+    }
     NSEventModifierFlags flags = event.modifierFlags;
     unsigned int mods = 0;
     if (flags & NSEventModifierFlagCommand) mods |= 1u;
     if (flags & NSEventModifierFlagShift) mods |= 2u;
     if (flags & NSEventModifierFlagControl) mods |= 4u;
     if (flags & NSEventModifierFlagOption) mods |= 8u;
+    if (self.f3Down && event.keyCode != kKeyCodeF3) {
+        mods |= 16u; // ShortcutMod_F3: F3 held as a chord prefix
+    }
     _pendingKeyEvents[_pendingKeyEventCount++] =
         (KeyEvent){(int)event.keyCode, codepoint, mods, (bool)pressed};
 }
@@ -196,26 +202,14 @@ constexpr int kMaxDropPathLength = 1024;
 }
 
 - (void)keyDown:(NSEvent *)event {
+    if (event.keyCode == kKeyCodeF3) {
+        self.f3Down = YES;
+    }
     if (!event.isARepeat) {
         [self enqueueKey:event pressed:YES];
     }
-
-    // The bare-letter debug toggles must not also fire when a modifier is
-    // held — Cmd-F is a command shortcut (fullscreen), not the FXAA toggle.
-    bool plainKey = (event.modifierFlags &
-                     (NSEventModifierFlagCommand | NSEventModifierFlagControl |
-                      NSEventModifierFlagOption)) == 0;
-    if (plainKey && [event.charactersIgnoringModifiers isEqualToString:@"o"]) {
-        self.pendingCycleDebug = YES;
-        return;
-    }
-    if (plainKey && [event.charactersIgnoringModifiers isEqualToString:@"f"]) {
-        self.pendingToggleFxaa = YES;
-        return;
-    }
-    if (event.keyCode == 99) { // F3
-        self.pendingToggleHud = YES;
-        return;
+    if (event.keyCode == kKeyCodeF3) {
+        return; // F3 is a chord prefix, never a character
     }
     if (event.keyCode == 53 && self.inFullscreen && self.onToggleFullscreen) { // Escape
         self.onToggleFullscreen();
@@ -226,6 +220,10 @@ constexpr int kMaxDropPathLength = 1024;
 
 - (void)keyUp:(NSEvent *)event {
     [self enqueueKey:event pressed:NO];
+    if (event.keyCode == kKeyCodeF3) {
+        self.f3Down = NO;
+        return;
+    }
     [super keyUp:event];
 }
 
@@ -257,6 +255,7 @@ constexpr int kMaxDropPathLength = 1024;
 }
 
 - (void)magnifyWithEvent:(NSEvent *)event {
+    self.pendingMagnification += (float)event.magnification;
     self.pendingZoom += (float)event.magnification;
 }
 
@@ -481,8 +480,7 @@ constexpr int kMaxDropPathLength = 1024;
         .zoomDelta = metalView.pendingZoom,
         .orbitYaw = metalView.pendingOrbitYaw,
         .orbitPitch = metalView.pendingOrbitPitch,
-        .cycleDebugView = (bool)metalView.pendingCycleDebug,
-        .toggleFxaa = (bool)metalView.pendingToggleFxaa,
+        .magnification = metalView.pendingMagnification,
         .mouseX = metalView.pendingMouseX,
         .mouseY = metalView.pendingMouseY,
         .mouseLeftDown = (bool)metalView.pendingMouseLeftDown,
@@ -513,17 +511,16 @@ constexpr int kMaxDropPathLength = 1024;
     metalView.pendingOrbitPitch = 0.0f;
     metalView.pendingScrollX = 0.0f;
     metalView.pendingScrollY = 0.0f;
-    metalView.pendingCycleDebug = NO;
-    metalView.pendingToggleFxaa = NO;
+    metalView.pendingMagnification = 0.0f;
     metalView.pendingDropCount = 0;
 
-    if (metalView.pendingToggleHud) {
-        self.hudView.hidden = !self.hudView.hidden;
-        metalView.pendingToggleHud = NO;
+    bool needsRender = FrameUpdate(self.arena, deltaTime, frameInput);
+
+    bool hudVisible = AppDebugHudVisible(self.arena);
+    if (hudVisible == (bool)self.hudView.hidden) {
+        self.hudView.hidden = !hudVisible;
         AppRequestRender(self.arena); // repopulate the frozen HUD readout
     }
-
-    bool needsRender = FrameUpdate(self.arena, deltaTime, frameInput);
     if (!needsRender || drawable == nil) {
         return; // nothing changed: leave the last presented frame on screen
     }

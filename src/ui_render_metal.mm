@@ -61,7 +61,7 @@ constexpr int kMaxUiVertices = 65536;
 
 constexpr int kFontFirstChar = 32;
 constexpr int kFontCharCount = 96;
-constexpr float kFontPixelSize = 20.0f; // logical UI px the atlas is baked at
+constexpr float kFontPixelSize = 28.0f; // logical UI px the atlas is baked at
 constexpr int kGlyphPad = 2;            // transparent gutter between atlas cells
 constexpr int kSdfSupersample = 4;     // CoreText raster scale before the distance transform
 constexpr float kSdfRange = 4.0f;      // logical px the signed distance spans each side of the edge
@@ -164,7 +164,14 @@ void CoverageToSignedField(const uint8_t *coverage, int width, int height, float
 // of signed distance fields via CoreText, and fills `out` with per-glyph
 // placement (quads carry a kSdfRange gutter so the shader can reconstruct the
 // edge). Falls back to the system UI font if the embedded face fails to load.
-id<MTLTexture> BuildFontAtlas(id<MTLDevice> device, UiFontMetrics *out) {
+// Returns the malloc'd R8 pixels; the caller uploads and frees them.
+//
+// Every cell is aligned to whole pixels: the ink box is snapped outward to
+// integers before the gutter is added, so `offsetX` / `offsetY` come out exact
+// integers and a snapped pen puts every glyph on the same pixel grid. The
+// glyph is still drawn at its true fractional position inside the cell, so the
+// sub-pixel phase survives in the distance field.
+uint8_t *BakeFontAtlas(UiFontMetrics *out, int *outAtlasWidth, int *outAtlasHeight) {
     CTFontRef font = nullptr;
     CGDataProviderRef provider = CGDataProviderCreateWithData(
         nullptr, argentum_sans_regular_ttf, argentum_sans_regular_ttf_len, nullptr);
@@ -194,6 +201,9 @@ id<MTLTexture> BuildFontAtlas(id<MTLDevice> device, UiFontMetrics *out) {
     int cellX[kFontCharCount] = {};
     int cellW[kFontCharCount] = {};
     int cellH[kFontCharCount] = {};
+    int inkLeft[kFontCharCount] = {};
+    int inkBottom[kFontCharCount] = {};
+    int inkTop[kFontCharCount] = {};
 
     int pad = (int)ceil(kSdfRange);
     int atlasWidth = kGlyphPad;
@@ -206,8 +216,13 @@ id<MTLTexture> BuildFontAtlas(id<MTLDevice> device, UiFontMetrics *out) {
         CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyphs[i], &advances[i], 1);
         bool empty = glyphs[i] == 0 || CGRectIsNull(boundingRects[i]) ||
                      boundingRects[i].size.width <= 0.0;
-        cellW[i] = empty ? 0 : (int)ceil(boundingRects[i].size.width) + 1 + 2 * pad;
-        cellH[i] = empty ? 0 : (int)ceil(boundingRects[i].size.height) + 1 + 2 * pad;
+        CGRect bbox = boundingRects[i];
+        inkLeft[i] = (int)floor(bbox.origin.x);
+        inkBottom[i] = (int)floor(bbox.origin.y);
+        inkTop[i] = (int)ceil(bbox.origin.y + bbox.size.height);
+        int inkRight = (int)ceil(bbox.origin.x + bbox.size.width);
+        cellW[i] = empty ? 0 : (inkRight - inkLeft[i]) + 2 * pad;
+        cellH[i] = empty ? 0 : (inkTop[i] - inkBottom[i]) + 2 * pad;
         cellX[i] = atlasWidth;
         atlasWidth += cellW[i] + kGlyphPad;
         if (cellH[i] > atlasHeight) {
@@ -229,7 +244,6 @@ id<MTLTexture> BuildFontAtlas(id<MTLDevice> device, UiFontMetrics *out) {
         if (cellW[i] == 0) {
             continue;
         }
-        CGRect bbox = boundingRects[i];
         int hiWidth = cellW[i] * kSdfSupersample;
         int hiHeight = cellH[i] * kSdfSupersample;
 
@@ -241,7 +255,7 @@ id<MTLTexture> BuildFontAtlas(id<MTLDevice> device, UiFontMetrics *out) {
         CGContextSetShouldAntialias(ctx, true);
         CGContextSetGrayFillColor(ctx, 1.0, 1.0);
         CGContextScaleCTM(ctx, kSdfSupersample, kSdfSupersample);
-        CGPoint pos = CGPointMake((CGFloat)pad - bbox.origin.x, (CGFloat)pad - bbox.origin.y);
+        CGPoint pos = CGPointMake((CGFloat)(pad - inkLeft[i]), (CGFloat)(pad - inkBottom[i]));
         CTFontDrawGlyphs(font, &glyphs[i], &pos, 1, ctx);
         CGContextRelease(ctx);
 
@@ -265,18 +279,30 @@ id<MTLTexture> BuildFontAtlas(id<MTLDevice> device, UiFontMetrics *out) {
         }
         free(hiField);
 
-        // The atlas cell is the glyph ink box grown by `pad` on every side; the
-        // quad carries that gutter so the shader's smoothstep has field to read.
+        // The atlas cell is the pixel-aligned ink box grown by `pad` on every
+        // side; the quad carries that gutter so the shader's smoothstep has
+        // field to read. Row 0 of a CGBitmapContext is the image top, and the
+        // copy above preserved that, so v0 = 0 is the top of the cell.
         g.u0 = (float)cellX[i] / (float)atlasWidth;
         g.u1 = ((float)cellX[i] + cellW[i]) / (float)atlasWidth;
         g.v0 = 0.0f;
         g.v1 = (float)cellH[i] / (float)atlasHeight;
-        g.offsetX = (float)bbox.origin.x - pad;
-        g.offsetY = (float)(bbox.origin.y + bbox.size.height) + pad; // baseline -> top of cell, +up
+        g.offsetX = (float)(inkLeft[i] - pad);
+        g.offsetY = (float)(inkTop[i] + pad); // baseline -> top of cell, +up
         g.width = (float)cellW[i];
         g.height = (float)cellH[i];
     }
     CFRelease(font);
+
+    *outAtlasWidth = atlasWidth;
+    *outAtlasHeight = atlasHeight;
+    return pixels;
+}
+
+id<MTLTexture> BuildFontAtlas(id<MTLDevice> device, UiFontMetrics *out) {
+    int atlasWidth = 0;
+    int atlasHeight = 0;
+    uint8_t *pixels = BakeFontAtlas(out, &atlasWidth, &atlasHeight);
 
     MTLTextureDescriptor *descriptor =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
@@ -288,7 +314,7 @@ id<MTLTexture> BuildFontAtlas(id<MTLDevice> device, UiFontMetrics *out) {
     [atlas replaceRegion:MTLRegionMake2D(0, 0, atlasWidth, atlasHeight)
              mipmapLevel:0
                withBytes:pixels
-             bytesPerRow:bytesPerRow];
+             bytesPerRow:(size_t)atlasWidth];
     free(pixels);
     return atlas;
 }

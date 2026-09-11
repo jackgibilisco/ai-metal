@@ -6,6 +6,8 @@
 // the keybinding matcher all resolve through it, so a platform with no native
 // menu (a Windows port) still gets working shortcuts by scanning key events.
 
+#include "editor_flags.h"
+
 typedef int CommandId;
 
 enum {
@@ -14,16 +16,26 @@ enum {
     Command_ImportFile,
     Command_ToggleFullscreen,
     Command_ToggleMenuBar,
+    Command_ToggleFrameStats,
+    Command_CycleAoDebug,
+    Command_ToggleFxaa,
+    Command_ToggleLayoutBounds,
+    Command_ResetPanels,
 };
 
+// F3 is a held prefix, not a real modifier key: the platform layer ORs this bit
+// into every key event while F3 is down, so "F3+o" matches like any other
+// shortcut. F3 tapped alone (no chord) is its own shortcut, key 0.
 enum {
     ShortcutMod_Cmd = 1 << 0,
     ShortcutMod_Shift = 1 << 1,
     ShortcutMod_Ctrl = 1 << 2,
     ShortcutMod_Alt = 1 << 3,
+    ShortcutMod_F3 = 1 << 4,
 };
 
-// key is a lowercase ASCII codepoint; 0 means the command has no shortcut.
+// key is a lowercase ASCII codepoint; 0 with no mods means the command has no
+// shortcut.
 struct Shortcut {
     unsigned int key;
     unsigned int mods;
@@ -48,6 +60,7 @@ struct PlatformMenuHooks {
 // rendering, validation) reads menuState/fullscreen and never touches hooks.
 struct CommandContext {
     MenuState *menuState;
+    EditorFlags *flags;
     PlatformMenuHooks hooks;
     bool fullscreen;
 };
@@ -77,7 +90,7 @@ struct Menu {
     int entryCount;
 };
 
-constexpr int kMaxMenus = 6;
+constexpr int kMaxMenus = 8;
 
 struct MenuBar {
     Menu menus[kMaxMenus];

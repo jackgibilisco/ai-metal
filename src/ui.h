@@ -53,6 +53,13 @@ void UiSetUiScale(UiState *ui, float scale);
 void UiAdjustUiScale(UiState *ui, float delta);
 float UiUiScale(const UiState *ui);
 
+// Magenta outlines on every UI container, for auditing inset symmetry.
+void UiSetDebugLayout(UiState *ui, bool enabled);
+
+// Forget every panel's placement. The next UiBuildFrame recreates the slots, so
+// each panel returns to the dock and size its UiBeginPanel call site asks for.
+void UiResetPanels(UiState *ui);
+
 // The UI renderer bakes the glyph atlas and owns these metrics; the app hands
 // the pointer in once at startup. It must outlive `ui`. Text layout falls back
 // to a fixed 8px cell until this is set.
@@ -113,6 +120,11 @@ void UiEndPanel(UiState *ui);
 bool UiPanelButton(UiState *ui, const char *label);
 void UiPanelSlider(UiState *ui, const char *label, float *value);
 void UiPanelText(UiState *ui, const char *text);
+
+// Declares the body size (inside the padding) the current panel's contents need.
+// The panel is never docked or floated smaller than this. The UiPanel* controls
+// declare themselves; bodies laid out by hand call this directly.
+void UiPanelContentMin(UiState *ui, float width, float height);
 
 // True when the cursor is over UI chrome (any panel, the menu strip, an open
 // dropdown) or a UI drag is in progress. The platform layer withholds camera

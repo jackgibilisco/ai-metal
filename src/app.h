@@ -29,6 +29,10 @@ void AppRequestRender(Arena *arena);
 // Per-pass GPU time of the last completed frame, for the F3 HUD.
 RendererPassTimings FrameGpuTimings(Arena *arena);
 
+// Whether the platform layer should show its frame-timing HUD view. The flag
+// itself is owned by the command table (Debug > Frame Timing HUD).
+bool AppDebugHudVisible(Arena *arena);
+
 // Runs a command (from the native menu bar or the in-app strip) through the
 // shared command table.
 void AppInvokeCommand(Arena *arena, CommandId id);

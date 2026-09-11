@@ -25,6 +25,11 @@ constexpr int kConeSegments = 12;
 constexpr float kMinScaleFactor = 0.01f;
 constexpr float kMaxScaleFactor = 100.0f;
 
+// Scene icons, as fractions of the icon's on-screen size. The disc stops short
+// of the quad edge and the glyph is shrunk so both keep a visible margin.
+constexpr float kIconDiscRadius = 0.46f;
+constexpr float kIconGlyphScale = 0.8f;
+
 Vec3 HandleAxis(GizmoHandle handle) {
     switch (handle) {
         case GizmoHandle_AxisX: return Vec3{1.0f, 0.0f, 0.0f};
@@ -438,6 +443,19 @@ void IconArc(GizmoMeshBuilder *out, Vec3 c, Vec3 r, Vec3 u, float s, float cu, f
     }
 }
 
+// Camera-facing filled circle centred on the billboard, radius in the same
+// [-0.5, 0.5] units as BillboardPoint.
+void IconDisc(GizmoMeshBuilder *out, Vec3 c, Vec3 r, Vec3 u, float s, float radius, int segments,
+              const float color[4]) {
+    Vec3 prev = BillboardPoint(c, r, u, s, radius, 0.0f);
+    for (int i = 1; i <= segments; ++i) {
+        float a = kTwoPi * (float)i / (float)segments;
+        Vec3 cur = BillboardPoint(c, r, u, s, cosf(a) * radius, sinf(a) * radius);
+        PushTri(out, c, prev, cur, color);
+        prev = cur;
+    }
+}
+
 void GizmoBuildIcons(GizmoMeshBuilder *out, const IconInstance *icons, int count,
                      Vec3 cameraRight, Vec3 cameraUp, float iconWorldSize,
                      const IconColors &colors) {
@@ -450,21 +468,27 @@ void GizmoBuildIcons(GizmoMeshBuilder *out, const IconInstance *icons, int count
         Vec3 r = cameraRight;
         Vec3 u = cameraUp;
         float s = iconWorldSize;
+        // Glyphs are drawn at a reduced size so they keep a clear margin
+        // inside the ring; the coordinates below are in that glyph space.
+        float g = iconWorldSize * kIconGlyphScale;
+
+        IconDisc(out, p, r, u, s, kIconDiscRadius, 24, colors.backdrop);
+        IconArc(out, p, r, u, s, 0.0f, 0.0f, kIconDiscRadius, 0.0f, kTwoPi, 24, fill);
 
         if (icon.kind == 0) {
             // Volume: rectangular body + cone opening to the right, two waves.
-            IconQuad(out, p, r, u, s, -0.34f, -0.12f, -0.16f, 0.12f, fill);
-            Vec3 coneTop = BillboardPoint(p, r, u, s, -0.16f, 0.30f);
-            Vec3 coneBottom = BillboardPoint(p, r, u, s, -0.16f, -0.30f);
-            Vec3 coneTip = BillboardPoint(p, r, u, s, 0.06f, 0.0f);
+            IconQuad(out, p, r, u, g, -0.34f, -0.12f, -0.16f, 0.12f, fill);
+            Vec3 coneTop = BillboardPoint(p, r, u, g, -0.16f, 0.30f);
+            Vec3 coneBottom = BillboardPoint(p, r, u, g, -0.16f, -0.30f);
+            Vec3 coneTip = BillboardPoint(p, r, u, g, 0.06f, 0.0f);
             PushTri(out, coneBottom, coneTip, coneTop, fill);
-            IconArc(out, p, r, u, s, 0.06f, 0.0f, 0.20f, -0.9f, 0.9f, 6, fill);
-            IconArc(out, p, r, u, s, 0.06f, 0.0f, 0.34f, -0.8f, 0.8f, 7, fill);
+            IconArc(out, p, r, u, g, 0.06f, 0.0f, 0.20f, -0.9f, 0.9f, 6, fill);
+            IconArc(out, p, r, u, g, 0.06f, 0.0f, 0.34f, -0.8f, 0.8f, 7, fill);
         } else {
             // Headphones: headband arc + two ear cups.
-            IconArc(out, p, r, u, s, 0.0f, -0.06f, 0.34f, 0.30f, kPi - 0.30f, 12, fill);
-            IconQuad(out, p, r, u, s, -0.40f, -0.30f, -0.24f, 0.06f, fill);
-            IconQuad(out, p, r, u, s, 0.24f, -0.30f, 0.40f, 0.06f, fill);
+            IconArc(out, p, r, u, g, 0.0f, -0.06f, 0.34f, 0.30f, kPi - 0.30f, 12, fill);
+            IconQuad(out, p, r, u, g, -0.40f, -0.30f, -0.24f, 0.06f, fill);
+            IconQuad(out, p, r, u, g, 0.24f, -0.30f, 0.40f, 0.06f, fill);
         }
 
         if (icon.selected) {

@@ -138,9 +138,10 @@ The portable input/menu structs live in their own dependency-free headers
   mesh data, the embedded shader source, `RendererSetContentRect` (rebuilds
   the projection and the screen targets for a new content-region size, and
   stores the origin the final pass writes the drawable at),
-  `RendererUpdateCamera` (applies a frame's `FrameInput` — trackpad/mouse
-  pan/zoom/orbit deltas, plus the `o`-key debug-view cycle and `f`-key FXAA
-  toggle — to the camera), and `RendererRender`, which encodes one frame from
+  `RendererUpdateCamera` (applies a frame's `FrameInput` trackpad/mouse
+  pan/zoom/orbit deltas to the camera), `RendererSetDebugView` /
+  `RendererSetFxaaEnabled` (pushed each frame by app.cpp from `EditorFlags`,
+  which the Debug-menu commands mutate), and `RendererRender`, which encodes one frame from
   a `RenderTarget` (command buffer + drawable) handed in by the platform
   layer. The screen targets are content-region-sized; the last pass takes an
   `(originX, originY, w, h)` `MTLViewport` so the scene lands below the menu
@@ -149,8 +150,10 @@ The portable input/menu structs live in their own dependency-free headers
   the UI pass. It runs a small deferred pipeline: geometry pass ->
   a single g-buffer (RGBA16F: xyz = view-space normal, w = view-space Z, from
   which view-space X/Y are reconstructed), then a full-screen half-res SSAO
-  pass, then a lighting pass that folds in the 4x4 AO box blur, then an
-  optional FXAA pass; the last pass run writes the drawable.
+  pass, then a lighting pass that folds in the 4x4 AO box blur, then the
+  gizmo/icon overlay, then an optional FXAA pass (the overlay composites into
+  the lit image before FXAA so its edges are antialiased too); the last pass
+  run writes the drawable.
   `RendererLastFrameTimings` exposes the per-pass GPU time for the F3 HUD.
   See PLAN.md for the SSAO and FXAA detail.
 - **`src/platform_macos.mm`** — the only file allowed to touch AppKit. Owns
@@ -161,7 +164,8 @@ The portable input/menu structs live in their own dependency-free headers
   `rightMouseDragged:`/`otherMouseDragged:` for the camera; all three mouse
   buttons' down/up, `mouseDragged:`/`mouseMoved:` + a tracking area,
   `flagsChanged:` for modifiers, and a `keyDown:`/`keyUp:` `KeyEvent` queue
-  for the UI cursor) plus the `o`/`f`/`p`/`F3` one-shot keys, all assembled
+  for the UI cursor, with `ShortcutMod_F3` ORed into `mods` while F3 is held
+  so the command table matches F3 chords), all assembled
   in `renderIntoDrawable:` into the per-frame `FrameInput` snapshot (which
   also carries `fullscreen`) passed to `FrameUpdate`, and forwarding
   `MTKView`'s `drawableSizeWillChange:` to `FrameResize`. `app.cpp` zeroes

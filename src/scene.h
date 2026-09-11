@@ -252,7 +252,7 @@ int SceneBoxSelect(SceneState *scene, Mat4 viewProj, NdcRect rect, bool additive
 // Non-mesh entities (audio sources, listeners) have no MeshRenderer, so they
 // pick against a synthetic axis-aligned box of this half-extent centered on
 // the entity origin. One pick path covers meshes and icons alike.
-constexpr float kNonMeshPickHalfExtent = 0.3f;
+constexpr float kNonMeshPickHalfExtent = 0.5f;
 
 // Nearest entity whose world AABB (or synthetic box, above) the ray hits.
 // Returns false and leaves `out` untouched when nothing is hit.

@@ -131,6 +131,7 @@ struct IconColors {
     float source[4];
     float listener[4];
     float activeListener[4];
+    float backdrop[4]; // filled disc drawn behind the icon glyph
     float selectedOutline[4];
     float distanceSphere[4];
 };

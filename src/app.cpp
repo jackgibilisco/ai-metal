@@ -21,8 +21,14 @@ struct AppState {
     UiState *ui;
     UiRenderState *uiRender;
     MenuState menu;
+    EditorFlags flags;
     PlatformMenuHooks menuHooks;
     bool fullscreen; // tracked from the last FrameInput, for CommandContext
+
+    // F3 is a held chord prefix. Tapping it alone (down then up with no other
+    // key in between) is the Frame Timing HUD shortcut.
+    bool f3Down;
+    bool f3Chorded;
     int forcedRenderFrames; // FrameUpdate reports "needs render" while this is > 0
     bool addMenuRequested;  // the 'n' key, handed to the outliner for one frame
 
@@ -51,8 +57,11 @@ struct AppState {
 // A drag shorter than this is a click on empty space, not a box select.
 constexpr float kBoxSelectMinPixels = 3.0f;
 
+constexpr int kKeyCodeF3 = 99;
+
 CommandContext AppStateContext(AppState *appState) {
-    return CommandContext{&appState->menu, appState->menuHooks, appState->fullscreen};
+    return CommandContext{&appState->menu, &appState->flags, appState->menuHooks,
+                          appState->fullscreen};
 }
 
 void InvokeCommand(AppState *appState, CommandId id) {
@@ -213,6 +222,7 @@ void Init(Arena *arena, GpuContext *gpu, float drawableWidth, float drawableHeig
     appState->uiRender = UiRenderInit(arena, gpu);
     UiSetFontMetrics(appState->ui, UiRenderFontMetrics(appState->uiRender));
     appState->menuHooks = menuHooks;
+    appState->flags.fxaaEnabled = true;
 }
 
 bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
@@ -237,6 +247,21 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     }
 
     for (int i = 0; i < input.keyEventCount; ++i) {
+        if (input.keyEvents[i].keyCode == kKeyCodeF3) {
+            if (input.keyEvents[i].pressed) {
+                appState->f3Down = true;
+                appState->f3Chorded = false;
+            } else {
+                if (appState->f3Down && !appState->f3Chorded) {
+                    InvokeCommand(appState, Command_ToggleFrameStats);
+                }
+                appState->f3Down = false;
+            }
+            continue;
+        }
+        if (appState->f3Down) {
+            appState->f3Chorded = true;
+        }
         if (!input.keyEvents[i].pressed) {
             continue;
         }
@@ -252,8 +277,9 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
 
         // Editor tool shortcuts. Handled here, not through the menu command
         // table, because they act on scene state the table's CommandContext
-        // does not carry. Suppressed while a UI text field has the keyboard.
-        if (!UiWantsKeyboard(appState->ui)) {
+        // does not carry. Suppressed while a UI text field has the keyboard,
+        // and while F3 is held so the debug chords own those letters.
+        if (!UiWantsKeyboard(appState->ui) && !appState->f3Down) {
             int keyCode = input.keyEvents[i].keyCode;
             bool handled = true;
             if (key == '1') {
@@ -291,6 +317,14 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
         if (command != nullptr) {
             InvokeCommand(appState, command->id);
         }
+    }
+
+    RendererSetDebugView(appState->renderer, appState->flags.aoDebugView);
+    RendererSetFxaaEnabled(appState->renderer, appState->flags.fxaaEnabled);
+    UiSetDebugLayout(appState->ui, appState->flags.layoutBounds);
+    if (appState->flags.resetPanelsRequested) {
+        UiResetPanels(appState->ui);
+        appState->flags.resetPanelsRequested = false;
     }
 
     // Right/middle button drives orbit/pan. Once such a drag begins over the
@@ -331,11 +365,10 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     bool cameraMoved = cameraInput.panX != 0.0f || cameraInput.panY != 0.0f ||
                        cameraInput.zoomDelta != 0.0f || cameraInput.orbitYaw != 0.0f ||
                        cameraInput.orbitPitch != 0.0f;
-    bool renderToggled = input.cycleDebugView || input.toggleFxaa;
     bool uiInteracting = UiWantsMouse(appState->ui) || UiWantsKeyboard(appState->ui) ||
                          input.dragHovering;
 
-    bool needsRender = sceneChanged || cameraMoved || renderToggled || uiInteracting || playing ||
+    bool needsRender = sceneChanged || cameraMoved || uiInteracting || playing ||
                        appState->forcedRenderFrames > 0;
 
     if (appState->forcedRenderFrames > 0) {
@@ -379,6 +412,10 @@ void AppRequestRender(Arena *arena) {
 RendererPassTimings FrameGpuTimings(Arena *arena) {
     AppState *appState = (AppState *)arena->base;
     return RendererLastFrameTimings(appState->renderer);
+}
+
+bool AppDebugHudVisible(Arena *arena) {
+    return ((AppState *)arena->base)->flags.frameStatsHud;
 }
 
 void AppInvokeCommand(Arena *arena, CommandId id) {

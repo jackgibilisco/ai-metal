@@ -20,8 +20,11 @@ struct FrameInput {
     float zoomDelta;
     float orbitYaw;
     float orbitPitch;
-    bool cycleDebugView; // one keypress: advance the AO debug view mode
-    bool toggleFxaa;     // one keypress: enable/disable the FXAA post pass
+
+    // Trackpad pinch this frame, in the raw NSEvent magnification unit. Kept
+    // separate from zoomDelta so the UI can claim it (timeline zoom) while the
+    // camera still gets it everywhere else.
+    float magnification;
 
     // Cursor in backing pixels with a top-left origin (the drawable's space).
     float mouseX;

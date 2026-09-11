@@ -15,7 +15,7 @@ viewport interaction + draw, wav drag-drop).
 ## Build and run
 
 ```
-make        # build build/ai_metal
+make        # build build/Renderer
 make run    # build and launch
 make clean  # remove build/
 ```
@@ -31,12 +31,16 @@ error in the console output, alongside two dockable UI panels ("Controls"
 right, "Scene" left) with title bars that shrink the 3D viewport; drag a
 title bar to tear a panel off and re-dock or float it. A tool toolbar
 overlays the top-left of the viewport (Select / Translate / Rotate / Scale /
-Add Source / Add Listener / Snap). The `o` key cycles the ambient-occlusion
-debug view (normal / raw AO buffer / AO disabled); the `f` key toggles the
-FXAA post pass; the spacebar toggles the timeline transport (the editor's
-global sim clock — while paused, sim/audio time holds but the camera still
-orbits); `F3` toggles the frame-timing debug HUD (which also shows per-pass
-GPU time); ⌃⌘F (View menu) toggles borderless fullscreen. `tests/` holds
+Add Source / Add Listener / Snap). Debug toggles are F3 chords (hold F3,
+press the key), all listed in the Debug menu: F3+O cycles the
+ambient-occlusion debug view (normal / raw AO buffer / AO disabled), F3+F
+toggles the FXAA post pass, F3+B toggles the layout-bounds overlay (magenta
+outlines on every UI container, for auditing inset symmetry), and tapping F3
+alone toggles the frame-timing HUD (which also shows per-pass GPU time).
+Window > Reset Panel Layout restores every panel's startup dock and size. The
+spacebar toggles the timeline transport (the editor's global sim clock — while
+paused, sim/audio time holds but the camera still orbits); pinch over the
+timeline zooms it. ⌃⌘F (View menu) toggles borderless fullscreen. `tests/` holds
 headless unit tests (not in the Makefile; build them standalone). In fullscreen an in-app menu strip appears at the top
 (mirroring the hidden macOS menu bar); View > Toggle Menu Bar also shows it
 while windowed. The frame loop pauses entirely when the app is inactive or

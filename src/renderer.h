@@ -37,6 +37,10 @@ void RendererSetContentRect(RendererState *renderer, float originX, float origin
                             float height);
 void RendererUpdateCamera(RendererState *renderer, FrameInput input);
 
+// Debug view state, pushed in from the app's EditorFlags each frame.
+void RendererSetDebugView(RendererState *renderer, int mode); // 0 normal, 1 raw AO, 2 AO off
+void RendererSetFxaaEnabled(RendererState *renderer, bool enabled);
+
 // The orbit camera's focus point (world space) — where new entities drop when
 // the placement ray has no better hit.
 Vec3 RendererCameraFocus(const RendererState *renderer);

@@ -37,14 +37,14 @@ double AudioWavDuration(const AudioState *, WavId) { return 0.0; }
 
 // Must match the file-local constants in src/ui.cpp.
 constexpr float kHeaderWidth = 184.0f; // kTimelineHeaderWidth
-constexpr float kPanelPad = 14.0f;     // kPadding
+constexpr float kPanelPad = 22.0f;     // kPadding
 
 // ---------------------------------------------------------------------------
 // Font metrics: the metrics half of BuildFontAtlas (src/ui_render_metal.mm),
 // via CoreText only. No Metal, no SDF raster.
 // ---------------------------------------------------------------------------
 static void BuildFontMetricsCoreText(UiFontMetrics *out) {
-    const CGFloat size = 20.0; // kFontPixelSize
+    const CGFloat size = 28.0; // kFontPixelSize
     const int pad = 4;         // ceil(kSdfRange)
 
     CTFontRef font = nullptr;
@@ -85,10 +85,14 @@ static void BuildFontMetricsCoreText(UiFontMetrics *out) {
         if (empty) {
             continue;
         }
-        g.width = (float)((int)ceil(bbox.size.width) + 1 + 2 * pad);
-        g.height = (float)((int)ceil(bbox.size.height) + 1 + 2 * pad);
-        g.offsetX = (float)bbox.origin.x - pad;
-        g.offsetY = (float)(bbox.origin.y + bbox.size.height) + pad;
+        int inkLeft = (int)floor(bbox.origin.x);
+        int inkBottom = (int)floor(bbox.origin.y);
+        int inkRight = (int)ceil(bbox.origin.x + bbox.size.width);
+        int inkTop = (int)ceil(bbox.origin.y + bbox.size.height);
+        g.width = (float)((inkRight - inkLeft) + 2 * pad);
+        g.height = (float)((inkTop - inkBottom) + 2 * pad);
+        g.offsetX = (float)(inkLeft - pad);
+        g.offsetY = (float)(inkTop + pad);
     }
 
     CGGlyph h = 0;
@@ -639,8 +643,10 @@ int main() {
 
     MenuState menu = {};
     menu.showMenuBar = true;
+    EditorFlags flags = {};
     CommandContext ctx = {};
     ctx.menuState = &menu;
+    ctx.flags = &flags;
 
     FrameInput in = {};
     in.mouseX = -1.0f;

@@ -19,7 +19,7 @@ constexpr float kFovYRadians = 60.0f * (float)M_PI / 180.0f;
 // On-screen size the gizmo arms and the entity icons hold as the camera
 // dollies, in content-viewport pixels.
 constexpr float kGizmoPixelSize = 80.0f;
-constexpr float kIconPixelSize = 26.0f;
+constexpr float kIconPixelSize = 40.0f;
 
 // Per-frame overlay geometry (gizmo + icons). Sized for the worst realistic
 // frame; GizmoMeshBuilder clamps rather than overruns.
@@ -786,14 +786,13 @@ void RendererSetContentRect(RendererState *renderer, float originX, float origin
     AllocateScreenTargets(renderer, (uint32_t)(width + 0.5f), (uint32_t)(height + 0.5f));
 }
 
-void RendererUpdateCamera(RendererState *renderer, FrameInput input) {
-    if (input.cycleDebugView) {
-        renderer->debugMode = (renderer->debugMode + 1) % 3;
-    }
-    if (input.toggleFxaa) {
-        renderer->fxaaEnabled = !renderer->fxaaEnabled;
-    }
+void RendererSetDebugView(RendererState *renderer, int mode) { renderer->debugMode = mode; }
 
+void RendererSetFxaaEnabled(RendererState *renderer, bool enabled) {
+    renderer->fxaaEnabled = enabled;
+}
+
+void RendererUpdateCamera(RendererState *renderer, FrameInput input) {
     renderer->cameraYaw -= input.orbitYaw * kOrbitSensitivity;
     renderer->cameraPitch =
         Clamp(renderer->cameraPitch + input.orbitPitch * kOrbitSensitivity, -kMaxCameraPitch, kMaxCameraPitch);
@@ -1052,6 +1051,7 @@ void BuildOverlayGeometry(RendererState *renderer, const RendererSceneView *view
     CopyThemeColor(iconColors.source, theme::AudioSourceIcon);
     CopyThemeColor(iconColors.listener, theme::ListenerIcon);
     CopyThemeColor(iconColors.activeListener, theme::ListenerActive);
+    CopyThemeColor(iconColors.backdrop, theme::IconBackdrop);
     CopyThemeColor(iconColors.selectedOutline, theme::SelectionOutline);
     CopyThemeColor(iconColors.distanceSphere, theme::AudioDistanceSphere);
 
@@ -1168,14 +1168,18 @@ void RendererRender(RendererState *renderer, const RendererSceneView *view,
     if (aoEnabled) {
         EncodeAoPass(renderer, target.commandBuffer);
     }
+    // With FXAA on, the gizmo and icons composite into the lit image before the
+    // FXAA resolve, so their edges are antialiased along with the geometry.
     if (fxaaEnabled) {
         EncodeLightingPass(renderer, target.commandBuffer, renderer->litColorTexture, fullViewport);
+        EncodeOverlayPass(renderer, view, target.commandBuffer, renderer->litColorTexture,
+                          fullViewport);
         EncodeFxaaPass(renderer, target.commandBuffer, target.drawable.texture, contentViewport);
     } else {
         EncodeLightingPass(renderer, target.commandBuffer, target.drawable.texture, contentViewport);
+        EncodeOverlayPass(renderer, view, target.commandBuffer, target.drawable.texture,
+                          contentViewport);
     }
-    EncodeOverlayPass(renderer, view, target.commandBuffer, target.drawable.texture,
-                      contentViewport);
 
     uint32_t encodedSlotMask =
         (1u << 0) | (1u << 2) | (aoEnabled ? (1u << 1) : 0u) | (fxaaEnabled ? (1u << 3) : 0u);
