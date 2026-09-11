@@ -1,6 +1,7 @@
 # AI Metal Renderer
 
-This project is mainly a way for me to experiment with my Claude setup (currently just a ~/.claude/CLAUDE.md file) to try to get it to generate human-readable code without comment spam.
+This project is mainly a way for me to experiment with my Claude setup to try to get it to generate human-readable code without comment spam.
+I have also worked on maximizing token efficiency by clearing and compacting when necessary, using efficiency pre-tool hooks, and several skill files.
 I've also been playing around with how much I have to specify in the prompt vs how much it can figure out on its own.
 
 Here was the initial prompt to get a basic renderer:
@@ -17,10 +18,6 @@ For testing purposes, spawn 3 cubes on the first frame and rotate them every fra
 ```
 
 So far I've written no code by hand for this project, and I intend to keep it that way as long as I can.
-
-Total token count: 95.74M
-
-Total cost: $33.62
 
 # Build Instructions
 
