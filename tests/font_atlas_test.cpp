@@ -3,19 +3,16 @@
 // between a quad's top edge and the glyph's first inked row must be the same
 // for every glyph, so that one snapped baseline puts all of them on one line.
 //
-// Includes the backend source directly because BakeFontAtlas lives in an
-// anonymous namespace; no MTLDevice is ever created.
-//
 // Build + run:
-//   clang++ -std=c++17 -fobjc-arc -Wall -Wextra -I src tests/font_atlas_test.mm \
-//     -framework Metal -framework QuartzCore -framework CoreText \
-//     -framework CoreGraphics -framework Foundation \
+//   clang++ -std=c++17 -Wall -Wextra -I src tests/font_atlas_test.cpp src/font_atlas.cpp \
+//     -framework CoreText -framework CoreGraphics -framework CoreFoundation \
 //     -o build/font_atlas_test && build/font_atlas_test
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
-#include "../src/ui_render_metal.mm"
+#include "font_atlas.h"
 
 static int g_failures = 0;
 

@@ -17,7 +17,8 @@ struct RendererState;
 // GPU time in milliseconds for each pass of the last completed frame, for
 // the F3 HUD. A pass that didn't run that frame reads 0. Per-pass values
 // assume Apple-silicon nanosecond timestamps; total is measured
-// independently from the command buffer's GPU start/end.
+// independently from the command buffer's GPU start/end. The GL backend has
+// no GPU timer on macOS and reports all zeros.
 struct RendererPassTimings {
     float geometryMs;
     float aoMs;

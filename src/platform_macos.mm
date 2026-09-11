@@ -1,22 +1,21 @@
-// The only file in this project allowed to touch AppKit. It owns the window
-// and the frame-driving loop, and calls Init/FrameUpdate/FrameRender.
+// The AppKit platform layer both graphics backends share: the window, input,
+// menus, HUD, and frame loop, calling Init/FrameUpdate/FrameRender. The
+// drawable surface and presentation belong to the linked presenter
+// (platform_macos_present.h); together they are the only AppKit code.
 
 #import <Cocoa/Cocoa.h>
-#import <MetalKit/MetalKit.h>
 #import <QuartzCore/QuartzCore.h>
-#import <QuartzCore/CAMetalDisplayLink.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include "app.h"
 #include "arena.h"
 #include "frame_stats.h"
-#include "gpu_metal.h"
+#include "platform_macos_present.h"
 
 namespace {
 constexpr size_t kArenaSize = 192 * 1024 * 1024;
 constexpr CGFloat kWindowWidth = 960;
 constexpr CGFloat kWindowHeight = 600;
-constexpr MTLPixelFormat kDepthFormat = MTLPixelFormatDepth32Float;
 
 // A mouse wheel reports coarse line-based deltas (~1 per notch); scale them
 // into the same magnification range a trackpad pinch produces.
@@ -41,12 +40,12 @@ constexpr float kMouseWheelZoom = 0.05f;
 // middle-drag, wheel) both land here as NSEvents, hit-tested to whichever view
 // is under the cursor — they don't require first-responder status the way key
 // events do. Deltas are just accumulated per frame and handed to the renderer
-// in renderIntoDrawable:, which resets them.
+// in renderFrame, which resets them.
 constexpr int kMaxDroppedFiles = 16;
 constexpr int kMaxDropPathLength = 1024;
 constexpr unsigned short kKeyCodeF3 = 99;
 
-@interface AppMetalView : MTKView
+@interface AppContentView : NSView
 @property(nonatomic) float pendingPanX;
 @property(nonatomic) float pendingPanY;
 @property(nonatomic) float pendingZoom;
@@ -74,23 +73,50 @@ constexpr unsigned short kKeyCodeF3 = 99;
 @property(nonatomic) int pendingDragHoverCount;
 @property(nonatomic) BOOL inFullscreen; // kept in sync by AppDelegate
 @property(nonatomic, copy) void (^onToggleFullscreen)(void);
+@property(nonatomic, copy) void (^onResize)(void); // bounds or backing scale changed
 - (int)drainKeyEventsInto:(KeyEvent *)dest max:(int)max;
 - (const char *const *)droppedFilePaths;
 @end
 
-@implementation AppMetalView {
+@implementation AppContentView {
     KeyEvent _pendingKeyEvents[kMaxKeyEvents];
     int _pendingKeyEventCount;
     char _droppedPaths[kMaxDroppedFiles][kMaxDropPathLength];
     const char *_droppedPathPointers[kMaxDroppedFiles];
 }
 
-- (instancetype)initWithFrame:(CGRect)frame device:(id<MTLDevice>)device {
-    self = [super initWithFrame:frame device:device];
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
     if (self != nil) {
+        self.wantsLayer = YES;
         [self registerForDraggedTypes:@[ NSPasteboardTypeFileURL ]];
     }
     return self;
+}
+
+- (CALayer *)makeBackingLayer {
+    CALayer *layer = PresenterMakeBackingLayer();
+    return layer != nil ? layer : [super makeBackingLayer];
+}
+
+- (void)setFrameSize:(NSSize)newSize {
+    [super setFrameSize:newSize];
+    if (self.onResize) {
+        self.onResize();
+    }
+}
+
+- (void)viewDidChangeBackingProperties {
+    [super viewDidChangeBackingProperties];
+    if (self.onResize) {
+        self.onResize();
+    }
+}
+
+// The drawable's height in backing pixels, for flipping AppKit's bottom-left
+// points into the top-left pixels FrameInput uses.
+- (CGFloat)backingHeight {
+    return [self convertSizeToBacking:self.bounds.size].height;
 }
 
 - (BOOL)acceptsFirstResponder {
@@ -158,7 +184,7 @@ constexpr unsigned short kKeyCodeF3 = 99;
     NSPoint inView = [self convertPoint:sender.draggingLocation fromView:nil];
     NSPoint inBacking = [self convertPointToBacking:inView];
     self.pendingDragHoverX = (float)inBacking.x;
-    self.pendingDragHoverY = (float)(self.drawableSize.height - inBacking.y);
+    self.pendingDragHoverY = (float)([self backingHeight] - inBacking.y);
     self.pendingDragHoverCount = wavCount;
     self.pendingDragHovering = YES;
     return NSDragOperationCopy;
@@ -186,13 +212,13 @@ constexpr unsigned short kKeyCodeF3 = 99;
     NSPoint inView = [self convertPoint:sender.draggingLocation fromView:nil];
     NSPoint inBacking = [self convertPointToBacking:inView];
     self.pendingDropX = (float)inBacking.x;
-    self.pendingDropY = (float)(self.drawableSize.height - inBacking.y);
+    self.pendingDropY = (float)([self backingHeight] - inBacking.y);
     self.pendingDropCount = count;
     return YES;
 }
 
 // Intercepts the View menu's Cmd-F item and any programmatic -toggleFullScreen:,
-// replacing AppKit's Spaces fullscreen (which throttles CAMetalDisplayLink to
+// replacing AppKit's Spaces fullscreen (which throttles the display link to
 // 120 Hz) with a borderless screen-sized window.
 - (void)toggleFullScreen:(id)sender {
     (void)sender;
@@ -286,7 +312,7 @@ constexpr unsigned short kKeyCodeF3 = 99;
     NSPoint inView = [self convertPoint:event.locationInWindow fromView:nil];
     NSPoint inBacking = [self convertPointToBacking:inView];
     self.pendingMouseX = (float)inBacking.x;
-    self.pendingMouseY = (float)(self.drawableSize.height - inBacking.y);
+    self.pendingMouseY = (float)([self backingHeight] - inBacking.y);
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -342,8 +368,8 @@ constexpr unsigned short kKeyCodeF3 = 99;
 
 // A transparent overlay pinned over the whole content view. It draws a
 // frame-time readout and graph in its top-left corner from a FrameStats it
-// owns; renderIntoDrawable: feeds it one sample per frame. hitTest: returns nil so
-// camera drags pass straight through to the MTKView underneath.
+// owns; renderFrame feeds it one sample per frame. hitTest: returns nil so
+// camera drags pass straight through to the content view underneath.
 @interface DebugHudView : NSView
 @property(nonatomic) float targetFrameMs; // one display refresh; sets the graph scale
 @property(nonatomic) RendererPassTimings passTimings; // last frame's per-pass GPU time
@@ -434,85 +460,73 @@ constexpr unsigned short kKeyCodeF3 = 99;
 
 @end
 
-// MTKView is kept only as a configured CAMetalLayer host and resize hook; its
-// own draw loop is paused (it caps at 120 Hz on macOS). Frames are driven by
-// a CAMetalDisplayLink in AppDelegate, which calls renderIntoDrawable: with a
-// drawable from the layer's real display refresh.
-@interface AppViewDelegate : NSObject <MTKViewDelegate>
+// Drives one frame per display refresh: the presenter's display-link callback
+// calls renderFrame.
+@interface AppViewDelegate : NSObject
 @property(nonatomic) Arena *arena;
-@property(nonatomic) id<MTLCommandQueue> commandQueue;
+@property(nonatomic) Presenter *presenter;
 @property(nonatomic) CFTimeInterval lastTime;
 @property(nonatomic) DebugHudView *hudView;
-@property(nonatomic, weak) AppMetalView *metalView;
+@property(nonatomic, weak) AppContentView *contentView;
 @end
 
 @implementation AppViewDelegate
 
-- (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
-    (void)view;
-    [self resizeToDrawableSize:size];
-}
-
-// The paused MTKView no longer syncs its CAMetalLayer's drawableSize on its
-// own, and CAMetalDisplayLink pulls drawables straight from that layer, so
-// set it here (in backing pixels) alongside the renderer's screen targets.
-- (void)resizeToDrawableSize:(CGSize)size {
+// Sizes the presenter's drawable and the renderer's screen targets, in
+// backing pixels.
+- (void)resizeToBackingSize:(CGSize)size {
     if (size.width < 1.0 || size.height < 1.0) {
         return;
     }
-    ((CAMetalLayer *)self.metalView.layer).drawableSize = size;
+    PresenterResize(self.presenter, size);
     FrameResize(self.arena, (float)size.width, (float)size.height);
 }
 
-- (void)drawInMTKView:(MTKView *)view {
-    (void)view;
-}
-
-- (void)renderIntoDrawable:(id<CAMetalDrawable>)drawable {
+- (void)renderFrame {
     CFTimeInterval now = CACurrentMediaTime();
     float deltaTime = (self.lastTime == 0) ? 0.0f : (float)(now - self.lastTime);
     self.lastTime = now;
 
-    AppMetalView *metalView = self.metalView;
+    AppContentView *contentView = self.contentView;
     FrameInput frameInput = {
-        .panX = metalView.pendingPanX,
-        .panY = metalView.pendingPanY,
-        .zoomDelta = metalView.pendingZoom,
-        .orbitYaw = metalView.pendingOrbitYaw,
-        .orbitPitch = metalView.pendingOrbitPitch,
-        .magnification = metalView.pendingMagnification,
-        .mouseX = metalView.pendingMouseX,
-        .mouseY = metalView.pendingMouseY,
-        .mouseLeftDown = (bool)metalView.pendingMouseLeftDown,
-        .mouseRightDown = (bool)metalView.pendingMouseRightDown,
-        .mouseMiddleDown = (bool)metalView.pendingMouseMiddleDown,
-        .scrollX = metalView.pendingScrollX,
-        .scrollY = metalView.pendingScrollY,
-        .shift = (bool)metalView.pendingShift,
-        .ctrl = (bool)metalView.pendingCtrl,
-        .alt = (bool)metalView.pendingAlt,
-        .cmd = (bool)metalView.pendingCmd,
-        .fullscreen = (bool)metalView.inFullscreen,
+        .panX = contentView.pendingPanX,
+        .panY = contentView.pendingPanY,
+        .zoomDelta = contentView.pendingZoom,
+        .orbitYaw = contentView.pendingOrbitYaw,
+        .orbitPitch = contentView.pendingOrbitPitch,
+        .magnification = contentView.pendingMagnification,
+        .mouseX = contentView.pendingMouseX,
+        .mouseY = contentView.pendingMouseY,
+        .mouseLeftDown = (bool)contentView.pendingMouseLeftDown,
+        .mouseRightDown = (bool)contentView.pendingMouseRightDown,
+        .mouseMiddleDown = (bool)contentView.pendingMouseMiddleDown,
+        .scrollX = contentView.pendingScrollX,
+        .scrollY = contentView.pendingScrollY,
+        .shift = (bool)contentView.pendingShift,
+        .ctrl = (bool)contentView.pendingCtrl,
+        .alt = (bool)contentView.pendingAlt,
+        .cmd = (bool)contentView.pendingCmd,
+        .fullscreen = (bool)contentView.inFullscreen,
     };
     frameInput.keyEventCount =
-        [metalView drainKeyEventsInto:frameInput.keyEvents max:kMaxKeyEvents];
-    frameInput.droppedFiles = [metalView droppedFilePaths];
-    frameInput.droppedFileCount = metalView.pendingDropCount;
-    frameInput.dropX = metalView.pendingDropX;
-    frameInput.dropY = metalView.pendingDropY;
-    frameInput.dragHovering = (bool)metalView.pendingDragHovering;
-    frameInput.dragHoverX = metalView.pendingDragHoverX;
-    frameInput.dragHoverY = metalView.pendingDragHoverY;
-    frameInput.dragHoverFileCount = metalView.pendingDragHoverCount;
-    metalView.pendingPanX = 0.0f;
-    metalView.pendingPanY = 0.0f;
-    metalView.pendingZoom = 0.0f;
-    metalView.pendingOrbitYaw = 0.0f;
-    metalView.pendingOrbitPitch = 0.0f;
-    metalView.pendingScrollX = 0.0f;
-    metalView.pendingScrollY = 0.0f;
-    metalView.pendingMagnification = 0.0f;
-    metalView.pendingDropCount = 0;
+        [contentView drainKeyEventsInto:frameInput.keyEvents max:kMaxKeyEvents];
+    frameInput.droppedFiles = [contentView droppedFilePaths];
+    frameInput.droppedFileCount = contentView.pendingDropCount;
+    frameInput.dropX = contentView.pendingDropX;
+    frameInput.dropY = contentView.pendingDropY;
+    frameInput.dragHovering = (bool)contentView.pendingDragHovering;
+    frameInput.dragHoverX = contentView.pendingDragHoverX;
+    frameInput.dragHoverY = contentView.pendingDragHoverY;
+    frameInput.dragHoverFileCount = contentView.pendingDragHoverCount;
+    contentView.pendingPanX = 0.0f;
+    contentView.pendingPanY = 0.0f;
+    contentView.pendingZoom = 0.0f;
+    contentView.pendingOrbitYaw = 0.0f;
+    contentView.pendingOrbitPitch = 0.0f;
+    contentView.pendingScrollX = 0.0f;
+    contentView.pendingScrollY = 0.0f;
+    contentView.pendingMagnification = 0.0f;
+    contentView.pendingDropCount = 0;
 
     bool needsRender = FrameUpdate(self.arena, deltaTime, frameInput);
 
@@ -521,21 +535,20 @@ constexpr unsigned short kKeyCodeF3 = 99;
         self.hudView.hidden = !hudVisible;
         AppRequestRender(self.arena); // repopulate the frozen HUD readout
     }
-    if (!needsRender || drawable == nil) {
+    if (!needsRender) {
         return; // nothing changed: leave the last presented frame on screen
+    }
+    RenderTarget *target = PresenterBeginFrame(self.presenter);
+    if (target == nullptr) {
+        return;
     }
 
     if (deltaTime > 0.0f) {
         [self.hudView pushFrameTime:deltaTime];
     }
 
-    RenderTarget target;
-    target.commandBuffer = [self.commandQueue commandBuffer];
-    target.drawable = drawable;
-
-    FrameRender(self.arena, &target);
-    [target.commandBuffer presentDrawable:target.drawable];
-    [target.commandBuffer commit];
+    FrameRender(self.arena, target);
+    PresenterEndFrame(self.presenter);
 
     if (!self.hudView.hidden) {
         self.hudView.passTimings = FrameGpuTimings(self.arena);
@@ -544,16 +557,19 @@ constexpr unsigned short kKeyCodeF3 = 99;
 
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate,
-                                   CAMetalDisplayLinkDelegate, NSMenuItemValidation> {
+static void PresenterFrameHook(void *context) {
+    [(__bridge AppViewDelegate *)context renderFrame];
+}
+
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation> {
     Arena _arena;
     void *_arenaMemory;
 }
 @property(nonatomic) NSWindow *window;
-@property(nonatomic) AppMetalView *view;
+@property(nonatomic) AppContentView *view;
 @property(nonatomic) DebugHudView *hudView;
 @property(nonatomic) AppViewDelegate *viewDelegate;
-@property(nonatomic) CAMetalDisplayLink *metalDisplayLink;
+@property(nonatomic) Presenter *presenter;
 @property(nonatomic) BOOL borderlessFullscreen;
 @property(nonatomic) NSRect windowedFrame;
 @property(nonatomic) NSWindowStyleMask windowedStyleMask;
@@ -599,29 +615,29 @@ static void MenuHookQuit(void *context) {
     [self.window setTitle:@"Renderer"];
     [self.window setAcceptsMouseMovedEvents:YES];
     [self.window center];
-    // AppKit's own fullscreen throttles CAMetalDisplayLink to 120 Hz; disable
+    // AppKit's own fullscreen throttles the display link to 120 Hz; disable
     // it so the green button zooms and our borderless fullscreen is the only
     // fullscreen path.
     self.window.collectionBehavior = NSWindowCollectionBehaviorFullScreenNone;
 
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    // The view goes into the window before anything is sized, so its backing
+    // scale (and so the drawable size) is the screen's.
+    self.viewDelegate = [[AppViewDelegate alloc] init];
+    self.view = [[AppContentView alloc] initWithFrame:frame];
+    [self.window setContentView:self.view];
+    self.presenter =
+        PresenterCreate(self.view, PresenterFrameHook, (__bridge void *)self.viewDelegate);
+    CGSize backingSize = [self.view convertSizeToBacking:self.view.bounds.size];
+    PresenterResize(self.presenter, backingSize);
 
-    self.view = [[AppMetalView alloc] initWithFrame:frame device:device];
-    self.view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
-
-    CGSize drawableSize = self.view.drawableSize;
     PlatformMenuHooks menuHooks = {
         .importFile = MenuHookImportFile,
         .toggleFullscreen = MenuHookToggleFullscreen,
         .quit = MenuHookQuit,
         .context = (__bridge void *)self,
     };
-    GpuContext gpu = {
-        .device = device,
-        .colorFormat = self.view.colorPixelFormat,
-        .depthFormat = kDepthFormat,
-    };
-    Init(&_arena, &gpu, (float)drawableSize.width, (float)drawableSize.height, menuHooks);
+    Init(&_arena, PresenterGpuContext(self.presenter), (float)backingSize.width,
+         (float)backingSize.height, menuHooks);
     AppRequestRender(&_arena);
 
     self.hudView = [[DebugHudView alloc] initWithFrame:self.view.bounds];
@@ -629,42 +645,34 @@ static void MenuHookQuit(void *context) {
     self.hudView.hidden = YES;
     [self.view addSubview:self.hudView];
 
-    self.viewDelegate = [[AppViewDelegate alloc] init];
     self.viewDelegate.arena = &_arena;
-    self.viewDelegate.commandQueue = [device newCommandQueue];
+    self.viewDelegate.presenter = self.presenter;
     self.viewDelegate.hudView = self.hudView;
-    self.viewDelegate.metalView = self.view;
-    self.view.delegate = self.viewDelegate;
+    self.viewDelegate.contentView = self.view;
 
     __weak AppDelegate *weakSelf = self;
     self.view.onToggleFullscreen = ^{
         [weakSelf toggleBorderlessFullscreen];
     };
-
-    // MTKView's own draw loop tops out at 120 Hz on macOS, and so does an
-    // NSView CADisplayLink. Pause the view and drive frames from a
-    // CAMetalDisplayLink, which delivers drawables at the layer's true
-    // display refresh (240 Hz here). Created after the view is in a window
-    // so its layer is sized and on the right screen.
-    self.view.paused = YES;
-    self.view.enableSetNeedsDisplay = NO;
+    __weak AppViewDelegate *weakViewDelegate = self.viewDelegate;
+    __weak AppContentView *weakView = self.view;
+    self.view.onResize = ^{
+        [weakViewDelegate resizeToBackingSize:[weakView convertSizeToBacking:weakView.bounds.size]];
+    };
 
     self.window.delegate = self;
-    [self.window setContentView:self.view];
     [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:self.view];
     [NSApp activateIgnoringOtherApps:YES];
 
-    self.metalDisplayLink =
-        [[CAMetalDisplayLink alloc] initWithMetalLayer:(CAMetalLayer *)self.view.layer];
-    self.metalDisplayLink.delegate = self;
-    [self.metalDisplayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
-
+    // Started once the view is on screen, so the drawable surface is sized
+    // and on the right display.
+    PresenterStart(self.presenter);
     [self matchDisplayRefreshRate];
 }
 
 // Borderless screen-sized "fullscreen" — keeps the windowed compositor path,
-// which runs CAMetalDisplayLink at the full display refresh, unlike AppKit's
+// which runs the display link at the full display refresh, unlike AppKit's
 // Spaces fullscreen.
 - (void)toggleBorderlessFullscreen {
     self.borderlessFullscreen = !self.borderlessFullscreen;
@@ -692,7 +700,7 @@ static void MenuHookQuit(void *context) {
     self.view.inFullscreen = self.borderlessFullscreen;
     [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:self.view];
-    [self.viewDelegate resizeToDrawableSize:[self.view convertSizeToBacking:self.view.bounds.size]];
+    [self.viewDelegate resizeToBackingSize:[self.view convertSizeToBacking:self.view.bounds.size]];
     [self matchDisplayRefreshRate];
 }
 
@@ -705,11 +713,6 @@ static void MenuHookQuit(void *context) {
     return NO;
 }
 
-- (void)metalDisplayLink:(CAMetalDisplayLink *)link needsUpdate:(CAMetalDisplayLinkUpdate *)update {
-    (void)link;
-    [self.viewDelegate renderIntoDrawable:update.drawable];
-}
-
 // Pin the display link to the window's current display refresh rate, and
 // hand the matching per-frame millisecond target to the HUD for its graph
 // scale. Re-applied when the window is dragged to a different-rate monitor.
@@ -719,8 +722,7 @@ static void MenuHookQuit(void *context) {
     if (framesPerSecond <= 0) {
         framesPerSecond = 60;
     }
-    self.metalDisplayLink.preferredFrameRateRange =
-        CAFrameRateRangeMake((float)framesPerSecond, (float)framesPerSecond, (float)framesPerSecond);
+    PresenterMatchScreen(self.presenter, screen, (int)framesPerSecond);
     self.hudView.targetFrameMs = 1000.0f / (float)framesPerSecond;
 }
 
@@ -729,17 +731,17 @@ static void MenuHookQuit(void *context) {
     [self matchDisplayRefreshRate];
 }
 
-// Pause the CAMetalDisplayLink whenever the rendered result can't be seen —
+// Pause the display link whenever the rendered result can't be seen —
 // app inactive, window minimized, or window fully occluded — and resume on
 // the way back, re-priming the frame clock so the first frame back doesn't
 // integrate the whole gap.
 - (void)updateFrameLoopRunning {
     BOOL visible = (self.window.occlusionState & NSWindowOcclusionStateVisible) != 0;
     BOOL shouldRun = NSApp.active && visible && !self.window.miniaturized;
-    if (shouldRun == !self.metalDisplayLink.paused) {
+    if (shouldRun == PresenterRunning(self.presenter)) {
         return;
     }
-    self.metalDisplayLink.paused = !shouldRun;
+    PresenterSetRunning(self.presenter, shouldRun);
     if (shouldRun) {
         self.viewDelegate.lastTime = 0;
         AppRequestRender(&_arena);

@@ -27,17 +27,19 @@ AppRequestRender(arena)                                                       //
 AppInvokeCommand(arena, CommandId) / AppCommandContext(arena)                  // native menu bar
 ```
 
-`GpuContext` (device + swapchain formats) and `RenderTarget` (command buffer
-+ drawable) are forward-declared in `src/gpu.h` and opaque to `app.cpp`; the
-Metal backend defines them in `src/gpu_metal.h`. `platform_macos.mm` builds
-a `GpuContext` at startup and a `RenderTarget` each frame, and does the
-`presentDrawable:` + `commit` after `FrameRender` returns.
+`GpuContext` and `RenderTarget` are forward-declared in `src/gpu.h` and
+opaque to `app.cpp`; each graphics backend defines them: `src/gpu_metal.h`
+(device + formats; command buffer + color texture) and `src/gpu_gl.h`
+(empty, since the GL context is simply current; framebuffer + size). The
+linked presenter (`platform_macos_metal.mm` / `platform_macos_gl.mm`) builds
+the `GpuContext` at startup and a `RenderTarget` each frame, and presents
+after `FrameRender` returns.
 
 `FrameUpdate` returns whether anything the renderer would draw differently
 changed this frame (scene animated, camera moved, a render toggle fired, the
 UI is being interacted with, or `AppRequestRender` was called); when it
 returns false the platform layer skips `FrameRender` and leaves the last
-presented drawable on screen. The `CAMetalDisplayLink` is paused outright
+presented drawable on screen. The display link is paused outright
 when the window can't be seen (see the platform layer).
 
 `Init` pushes a small `AppState { SceneState*, AudioState*, TimelineState*,
@@ -122,8 +124,9 @@ The portable input/menu structs live in their own dependency-free headers
   (fragment branches on `mode` — solid color, or color with alpha from the
   R8 glyph atlas), the glyph atlas texture, a per-frame vertex buffer, and
   one alpha-blended Load-action pass drawn on top of the drawable after the
-  scene. A Windows port adds a sibling `ui_render_d3d12.cpp` and reuses
-  `ui.cpp` and `ui_render.h` unchanged.
+  scene. `ui_render_gl.cpp` is the OpenGL sibling; both upload the atlas
+  `font_atlas.cpp` bakes on the CPU. A Windows port adds a sibling
+  `ui_render_d3d12.cpp` and reuses `ui.cpp` and `ui_render.h` unchanged.
 - **`src/renderer.h` + `src/renderer_metal.mm` + `src/gpu_metal.h`** —
   `renderer.h` is the graphics-API-free contract (`RendererInit(arena,
   GpuContext*, w, h)`, `RendererRender(state, game, RenderTarget*)`, and the
@@ -134,15 +137,15 @@ The portable input/menu structs live in their own dependency-free headers
   four pipelines — geometry, AO, lighting, FXAA — depth state,
   vertex/index/uniform buffers, the screen-sized targets + lit-color target,
   the AO sample kernel + noise texture, per-pass GPU timestamp sample buffer,
-  orbit-camera state, the AO debug mode, the FXAA on/off flag), cube/plane
-  mesh data, the embedded shader source, `RendererSetContentRect` (rebuilds
+  the shared `RendererCamera`, the AO debug mode, the FXAA on/off flag),
+  the embedded shader source, `RendererSetContentRect` (rebuilds
   the projection and the screen targets for a new content-region size, and
   stores the origin the final pass writes the drawable at),
   `RendererUpdateCamera` (applies a frame's `FrameInput` trackpad/mouse
   pan/zoom/orbit deltas to the camera), `RendererSetDebugView` /
   `RendererSetFxaaEnabled` (pushed each frame by app.cpp from `EditorFlags`,
   which the Debug-menu commands mutate), and `RendererRender`, which encodes one frame from
-  a `RenderTarget` (command buffer + drawable) handed in by the platform
+  a `RenderTarget` (command buffer + color texture) handed in by the platform
   layer. The screen targets are content-region-sized; the last pass takes an
   `(originX, originY, w, h)` `MTLViewport` so the scene lands below the menu
   strip and left of the panel, and the UI pass fills the rest.
@@ -156,9 +159,27 @@ The portable input/menu structs live in their own dependency-free headers
   run writes the drawable.
   `RendererLastFrameTimings` exposes the per-pass GPU time for the F3 HUD.
   See PLAN.md for the SSAO and FXAA detail.
-- **`src/platform_macos.mm`** — the only file allowed to touch AppKit. Owns
-  the `NSWindow`, the `MTKView` (+ its delegate, whose `renderIntoDrawable:`
-  drives `FrameUpdate` every `CAMetalDisplayLink` callback and `FrameRender`
+- **`src/renderer_common.h`/`.cpp`** — the graphics-API-free half of the
+  renderer, shared by both backends so they agree by construction:
+  cube/plane mesh data, the orbit camera + content rect (`RendererCamera`,
+  `CameraUpdate`, `CameraScreenPointToRay`, `CameraGizmoScale`), the seeded
+  SSAO kernel + noise (`BuildAoSamples`), and the gizmo/icon overlay
+  geometry (`BuildOverlayGeometry`). `font_atlas.cpp` plays the same role
+  for the UI's SDF glyph atlas (CoreText).
+- **`src/renderer_gl.cpp` + `src/gpu_gl.h` + `src/gl_shader.*`** — the
+  OpenGL 4.1 core backend (`make opengl`): the same five passes with the MSL
+  ported line for line to GLSL. It renders its own textures with clip-space
+  y negated so they are stored top row first like Metal's, and every
+  shader samples them with Metal's uv unchanged; vertex shaders remap z to
+  Metal's [0, w] clip range. Apple's GL returns 0 from timer queries, so
+  `RendererLastFrameTimings` reports zeros. `make parity-test` renders
+  scripted cases through both backends headlessly
+  (`tests/render_parity.cpp` + `tests/offscreen_{metal.mm,gl.cpp}`) and
+  diffs the images (`tests/image_diff.cpp`); Metal is the reference.
+- **`src/platform_macos.mm`** — the AppKit platform layer both backends
+  share; it names no graphics API. Owns the `NSWindow`, the content view
+  `AppContentView` (+ `AppViewDelegate`, whose `renderFrame` drives
+  `FrameUpdate` every display-link callback and `FrameRender`
   only when `FrameUpdate` reports a change), the arena allocation, and
   reading trackpad/mouse `NSEvent`s (`scrollWheel:`/`magnifyWithEvent:`/
   `rightMouseDragged:`/`otherMouseDragged:` for the camera; all three mouse
@@ -166,12 +187,12 @@ The portable input/menu structs live in their own dependency-free headers
   `flagsChanged:` for modifiers, and a `keyDown:`/`keyUp:` `KeyEvent` queue
   for the UI cursor, with `ShortcutMod_F3` ORed into `mods` while F3 is held
   so the command table matches F3 chords), all assembled
-  in `renderIntoDrawable:` into the per-frame `FrameInput` snapshot (which
+  in `renderFrame` into the per-frame `FrameInput` snapshot (which
   also carries `fullscreen`) passed to `FrameUpdate`, and forwarding
-  `MTKView`'s `drawableSizeWillChange:` to `FrameResize`. `app.cpp` zeroes
+  the view's size / backing-scale changes (`onResize`) to `FrameResize`. `app.cpp` zeroes
   the camera deltas on frames where `UiWantsMouse` is true so panel drags
   don't move the camera. `AppDelegate.updateFrameLoopRunning` pauses the
-  `CAMetalDisplayLink` outright when the render can't be seen (`!NSApp.active`,
+  display link outright (`PresenterSetRunning`) when the render can't be seen (`!NSApp.active`,
   window minimized, or not `NSWindowOcclusionStateVisible`) and resumes on
   the matching `windowDidChangeOcclusionState:` /
   `applicationDid{Become,Resign}Active:` / `windowDid{Miniaturize,Deminiaturize}:`
@@ -192,39 +213,43 @@ The portable input/menu structs live in their own dependency-free headers
   `deltaTime` sample per frame. A future second platform (e.g. iOS or
   Windows) would add a new file at this layer plus a `ui_render_*` backend,
   and fill in `PlatformMenuHooks`; `game.*`, `ui.*`, `menu.*`, and
-  `renderer_metal.mm` is unchanged. `MTKView`'s built-in draw loop is left paused
-  (`paused = YES`, `enableSetNeedsDisplay = NO`) — it caps at 120 Hz on
-  macOS, and so does an `NSView` `CADisplayLink`. Frames are driven instead
-  by a `CAMetalDisplayLink` on the view's `CAMetalLayer`, whose
-  `metalDisplayLink:needsUpdate:` delegate callback hands a fresh drawable
-  to `AppViewDelegate.renderIntoDrawable:` (which does the `FrameUpdate` +
-  `FrameRender` the old `drawInMTKView:` used to). Its
-  `preferredFrameRateRange` is pinned to `NSScreen.maximumFramesPerSecond`
-  (re-applied from `matchDisplayRefreshRate` on `windowDidChangeScreen:`),
-  so a 240 Hz display renders at 240 Hz. The `MTKView` is retained only as
-  a preconfigured `CAMetalLayer` host and for its
-  `drawableSizeWillChange:` -> `FrameResize` hook. Fullscreen is *not*
-  AppKit's Spaces fullscreen (it throttles the `CAMetalDisplayLink` back to
+  the renderers are unchanged. Fullscreen is *not*
+  AppKit's Spaces fullscreen (it throttles the display link back to
   120 Hz); the window disables it (`NSWindowCollectionBehaviorFullScreenNone`)
   and fullscreen is instead a borderless screen-sized window
   (`AppDelegate.toggleBorderlessFullscreen`), which keeps the uncapped
   windowed compositor path. It is reached three ways: the View menu's
   "Toggle Full Screen" (Cmd-F) and any `-toggleFullScreen:` (routed through
-  `AppMetalView`'s override), the green zoom button (`windowShouldZoom:`
+  `AppContentView`'s override), the green zoom button (`windowShouldZoom:`
   returns NO after toggling), and Escape (only while already fullscreen,
   since there is no title bar to click). `AppWindow` overrides
   `canBecomeKeyWindow`/`canBecomeMainWindow` so the borderless window still
-  takes keyboard input. Because the paused `MTKView` no longer syncs its
-  `CAMetalLayer.drawableSize`, `AppViewDelegate.resizeToDrawableSize:` sets
-  it explicitly (from `mtkView:drawableSizeWillChange:` and after the
-  fullscreen toggle) so fullscreen renders at true backing resolution, not
-  an upscaled stale size. The borderless window is sized to *overhang* the
+  takes keyboard input. `AppViewDelegate.resizeToBackingSize:` resizes the
+  presenter's drawable (from the view's `onResize` and after the fullscreen
+  toggle) so fullscreen renders at true backing resolution, not an
+  upscaled stale size. The borderless window is sized to *overhang* the
   screen by 1px (`NSInsetRect(screen.frame, -1, -1)`): covering the display
   exactly triggers macOS's fullscreen bypass / direct scanout, which
   double-buffers and pins the frame rate to half the refresh (120 Hz on a
   240 Hz panel); the 1px overhang keeps the normal compositor path and is
   clipped off-screen. With the trimmed pipeline, fullscreen at a 5K backing
   runs ~2 ms GPU / 240 fps on an M2 Pro.
+- **`src/platform_macos_present.h` + `platform_macos_metal.mm` /
+  `platform_macos_gl.mm`** — the presenter, the graphics-API half of the
+  platform layer; exactly one is linked per binary. It supplies the content
+  view's backing layer, the `GpuContext`, drawable sizing, the
+  display-refresh frame callback, and `PresenterBeginFrame` /
+  `PresenterEndFrame` around `FrameRender`. The Metal presenter backs the
+  view with a `CAMetalLayer` and drives frames from a `CAMetalDisplayLink`
+  (MTKView's own loop and an `NSView` `CADisplayLink` both cap at 120 Hz on
+  macOS); it holds the drawable only for the duration of the
+  `metalDisplayLink:needsUpdate:` callback, pins `preferredFrameRateRange`
+  to `NSScreen.maximumFramesPerSecond` (re-applied via
+  `PresenterMatchScreen` on `windowDidChangeScreen:`), and sets the layer's
+  `drawableSize` itself since nothing else resizes it. The GL presenter
+  attaches an `NSOpenGLContext` (4.1 core, swap interval 0) to the view and
+  paces with a `CVDisplayLink` on the window's display, whose callback hops
+  to the main queue and drops refreshes while a frame is pending.
 
 `src/math3d.h` is header-only, pure-C++ `Vec3`/`Mat4` math (column-major,
 matching Metal Shading Language's `float4x4` layout byte-for-byte so CPU
