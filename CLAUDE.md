@@ -111,12 +111,12 @@ Layers by portability contract:
 | `src/renderer_metal.*` + `src/gpu_metal.h` | Metal, no AppKit | `RendererState`, 4 pipelines (geometry/AO/lighting/FXAA), deferred pass chain; does not present/commit |
 | `src/ui_render_metal.mm` | Metal only | UI pipeline, glyph atlas, per-frame vertex buffer |
 | `src/renderer_gl.cpp`, `src/ui_render_gl.cpp`, `src/gpu_gl.h`, `src/gl_shader.*` | OpenGL 4.1 core, no AppKit/Win32 | GL backend, same passes as Metal; no GPU timings (Apple GL timer queries read 0) |
-| `src/gl_loader.h`/`.cpp`, `src/third_party/glcorearb.h` | Windows only | one X-macro list of the 58 GL entry points, resolved through `wglGetProcAddress` with a fallback to `opengl32.dll` |
-| `src/platform_macos.mm` | AppKit, no graphics API | `NSWindow`, content view, arena alloc, NSEvent -> `FrameInput`, native menu, HUD, fullscreen |
-| `src/platform_macos_present.h`, `src/platform_macos_{metal,gl}.mm` | AppKit + one graphics API | presenter: backing layer / GL context, display link, per-frame begin + present |
-| `src/platform_windows.cpp` | Win32, no graphics API | window, arena alloc, messages -> `FrameInput`, `HMENU` from the command table, `IDropTarget`, `IFileOpenDialog`, borderless fullscreen, frame loop |
-| `src/platform_windows_present.h`, `src/platform_windows_gl.cpp` | Win32 + WGL | presenter: WGL 4.1 core context, swap interval 1, `DwmFlush` for idle frames |
-| `src/platform_windows_hud.h`/`.cpp` | Win32 GDI | the `DebugHudView` counterpart: a click-through layered overlay window |
+| `src/windows/gl_loader.h`/`.cpp`, `src/third_party/glcorearb.h` | Windows only | one X-macro list of the 58 GL entry points, resolved through `wglGetProcAddress` with a fallback to `opengl32.dll` |
+| `src/macos/platform_macos.mm` | AppKit, no graphics API | `NSWindow`, content view, arena alloc, NSEvent -> `FrameInput`, native menu, HUD, fullscreen |
+| `src/macos/platform_macos_present.h`, `src/macos/platform_macos_{metal,gl}.mm` | AppKit + one graphics API | presenter: backing layer / GL context, display link, per-frame begin + present |
+| `src/windows/platform_windows.cpp` | Win32, no graphics API | window, arena alloc, messages -> `FrameInput`, `HMENU` from the command table, `IDropTarget`, `IFileOpenDialog`, borderless fullscreen, frame loop |
+| `src/windows/platform_windows_present.h`, `src/windows/platform_windows_gl.cpp` | Win32 + WGL | presenter: WGL 4.1 core context, swap interval 1, `DwmFlush` for idle frames |
+| `src/windows/platform_windows_hud.h`/`.cpp` | Win32 GDI | the `DebugHudView` counterpart: a click-through layered overlay window |
 | `src/math3d.h` | header-only pure C++ | column-major `Vec3`/`Mat4`, layout matches MSL `float4x4` |
 | `src/undo_stack.h`/`.cpp` | pure C++, owned by no module | fixed-capacity undo/redo ring; stores each command's payload by value; scene and timeline both submit to one shared instance |
 | `src/frame_input.h`, `frame_stats.h` | dependency-free headers | portable input/timing structs |

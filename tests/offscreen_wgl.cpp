@@ -6,7 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "../src/platform_windows_present.h"
+#include "../src/windows/platform_windows_present.h"
 
 // Everything past context creation is the same as offscreen_gl.cpp: WGL just
 // needs a window to hang the context off, where CGL needs nothing at all.

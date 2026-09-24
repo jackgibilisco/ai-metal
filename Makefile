@@ -9,14 +9,14 @@ METAL_FRAMEWORKS := -framework Metal
 GL_FRAMEWORKS := -framework OpenGL -framework CoreVideo
 
 SRC_CPP := src/arena.cpp src/undo_stack.cpp src/scene.cpp src/audio.cpp src/timeline.cpp src/gizmo.cpp src/game.cpp src/scene_import.cpp src/blend_file.cpp src/menu.cpp src/ui.cpp src/app.cpp src/renderer_common.cpp src/font_atlas.cpp
-HEADERS := $(wildcard src/*.h)
+HEADERS := $(wildcard src/*.h src/macos/*.h)
 
 # Each binary links one graphics backend (renderer + UI renderer) and the
 # matching presenter beside the shared AppKit platform file.
 METAL_BACKEND := src/renderer_metal.mm src/ui_render_metal.mm
 GL_BACKEND := src/renderer_gl.cpp src/ui_render_gl.cpp src/gl_shader.cpp
-METAL_APP_SRC := $(SRC_CPP) $(METAL_BACKEND) src/platform_macos.mm src/platform_macos_metal.mm
-GL_APP_SRC := $(SRC_CPP) $(GL_BACKEND) src/platform_macos.mm src/platform_macos_gl.mm
+METAL_APP_SRC := $(SRC_CPP) $(METAL_BACKEND) src/macos/platform_macos.mm src/macos/platform_macos_metal.mm
+GL_APP_SRC := $(SRC_CPP) $(GL_BACKEND) src/macos/platform_macos.mm src/macos/platform_macos_gl.mm
 
 BUILD_DIR := build
 ZSTD_OBJ := $(BUILD_DIR)/zstddeclib.o

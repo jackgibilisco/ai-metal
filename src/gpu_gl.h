@@ -7,7 +7,7 @@
 // Every backend call assumes that owner's 4.1 core context is current.
 
 #ifdef _WIN32
-#include "gl_loader.h" // opengl32.dll exports only GL 1.1; the rest is loaded
+#include "windows/gl_loader.h" // opengl32.dll exports only GL 1.1; the rest is loaded
 #else
 #ifndef GL_SILENCE_DEPRECATION
 #define GL_SILENCE_DEPRECATION // macOS deprecates OpenGL but still ships 4.1 core

@@ -27,8 +27,8 @@ set CXXFLAGS=/nologo /std:c++17 /EHsc /W4 /O2 /MT /DUNICODE /D_UNICODE /D_CRT_SE
 set LIBS=opengl32.lib gdi32.lib user32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib advapi32.lib
 
 set CORE=src\arena.cpp src\undo_stack.cpp src\scene.cpp src\audio.cpp src\timeline.cpp src\gizmo.cpp src\game.cpp src\scene_import.cpp src\blend_file.cpp src\menu.cpp src\ui.cpp src\app.cpp src\renderer_common.cpp src\font_atlas.cpp
-set GL_BACKEND=src\renderer_gl.cpp src\ui_render_gl.cpp src\gl_shader.cpp src\gl_loader.cpp
-set PLATFORM=src\platform_windows.cpp src\platform_windows_gl.cpp src\platform_windows_hud.cpp
+set GL_BACKEND=src\renderer_gl.cpp src\ui_render_gl.cpp src\gl_shader.cpp src\windows\gl_loader.cpp
+set PLATFORM=src\windows\platform_windows.cpp src\windows\platform_windows_gl.cpp src\windows\platform_windows_hud.cpp
 
 rem zstd's amalgamated decompressor is C99, so it gets its own object.
 set ZSTD_OBJ=%OBJ%\zstddeclib.obj
@@ -60,7 +60,7 @@ cl %TESTFLAGS% tests\timeline_undo_test.cpp src\scene.cpp src\timeline.cpp src\a
 %BUILD%\scene_undo_test.exe || exit /b 1
 %BUILD%\timeline_undo_test.exe || exit /b 1
 
-cl %CXXFLAGS% tests\render_parity.cpp tests\offscreen_wgl.cpp %CORE% %GL_BACKEND% src\platform_windows_gl.cpp %ZSTD_OBJ% %LIBS% /link /OUT:%BUILD%\parity_gl.exe || exit /b 1
+cl %CXXFLAGS% tests\render_parity.cpp tests\offscreen_wgl.cpp %CORE% %GL_BACKEND% src\windows\platform_windows_gl.cpp %ZSTD_OBJ% %LIBS% /link /OUT:%BUILD%\parity_gl.exe || exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /O2 /MT /D_CRT_SECURE_NO_WARNINGS /Fo%OBJ%\diff_ tests\image_diff.cpp /link /OUT:%BUILD%\image_diff.exe || exit /b 1
 
 if exist %BUILD%\parity\gl rmdir /s /q %BUILD%\parity\gl
