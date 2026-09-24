@@ -1,6 +1,6 @@
 CXX := clang++
 CC := clang
-CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -fobjc-arc
+CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -fobjc-arc -I src
 LDFLAGS :=
 
 HEADLESS_FRAMEWORKS := -framework Foundation -framework QuartzCore -framework CoreAudio -framework AudioToolbox -framework AudioUnit
@@ -59,11 +59,11 @@ run-opengl: opengl
 
 $(BUILD_DIR)/parity_metal: $(PARITY_SRC) tests/offscreen_metal.mm $(METAL_BACKEND) $(HEADERS) tests/offscreen.h $(ZSTD_OBJ)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -I src $(HEADLESS_FRAMEWORKS) $(METAL_FRAMEWORKS) $(PARITY_SRC) tests/offscreen_metal.mm $(METAL_BACKEND) $(ZSTD_OBJ) $(LDFLAGS) -o $@
+	$(CXX) $(CXXFLAGS) $(HEADLESS_FRAMEWORKS) $(METAL_FRAMEWORKS) $(PARITY_SRC) tests/offscreen_metal.mm $(METAL_BACKEND) $(ZSTD_OBJ) $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/parity_gl: $(PARITY_SRC) tests/offscreen_gl.cpp $(GL_BACKEND) $(HEADERS) tests/offscreen.h $(ZSTD_OBJ)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -I src $(HEADLESS_FRAMEWORKS) -framework OpenGL $(PARITY_SRC) tests/offscreen_gl.cpp $(GL_BACKEND) $(ZSTD_OBJ) $(LDFLAGS) -o $@
+	$(CXX) $(CXXFLAGS) $(HEADLESS_FRAMEWORKS) -framework OpenGL $(PARITY_SRC) tests/offscreen_gl.cpp $(GL_BACKEND) $(ZSTD_OBJ) $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/image_diff: tests/image_diff.cpp
 	@mkdir -p $(BUILD_DIR)
