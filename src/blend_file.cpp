@@ -1,6 +1,6 @@
 #include "blend_file.h"
 
-#include <zstd.h>
+#include "third_party/zstd/zstd.h"
 
 #include <cstdio>
 #include <cstring>

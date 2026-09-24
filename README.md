@@ -31,4 +31,6 @@ Enter the project directory
 
 Build and run the program
 
-`make run`
+macOS: `make run` (Metal) or `make run-opengl`
+
+Windows: `build.bat run` (OpenGL 4.1, needs the Visual Studio C++ build tools)

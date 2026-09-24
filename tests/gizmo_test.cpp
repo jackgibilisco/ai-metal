@@ -252,8 +252,8 @@ static void TestBuildIcons() {
 
     GizmoMeshBuilder b = {lines, 0, 8192, tris, 0, 8192};
     GizmoBuildIcons(&b, &one, 1, Vec3{1, 0, 0}, Vec3{0, 1, 0}, 0.5f, colors);
-    CHECK(b.triCount == 9);   // body quad (6) + cone (3)
-    CHECK(b.lineCount == 26); // two arc waves
+    CHECK(b.triCount == 81);  // backdrop disc (72) + body quad (6) + cone (3)
+    CHECK(b.lineCount == 74); // ring (48) + two arc waves (12 + 14)
     int unselectedLines = b.lineCount;
 
     one.selected = true;
@@ -261,7 +261,7 @@ static void TestBuildIcons() {
     one.maxDistance = 5.0f;
     b = GizmoMeshBuilder{lines, 0, 8192, tris, 0, 8192};
     GizmoBuildIcons(&b, &one, 1, Vec3{1, 0, 0}, Vec3{0, 1, 0}, 0.5f, colors);
-    CHECK(b.triCount == 9); // selection does not add fill
+    CHECK(b.triCount == 81); // selection does not add fill
     CHECK(b.lineCount == unselectedLines + 8 + 2 * 288); // 4-seg outline + two wire spheres
 }
 

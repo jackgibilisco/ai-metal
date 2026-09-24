@@ -123,6 +123,21 @@ constexpr unsigned short kKeyCodeF3 = 99;
     return YES;
 }
 
+// macOS virtual key codes for the keys app.cpp and ui.cpp act on. They stay in
+// this file; FrameInput carries the portable Key_* value instead.
+static int NormalizedKeyCode(unsigned short macKeyCode) {
+    switch (macKeyCode) {
+    case 36: return Key_Return;
+    case 53: return Key_Escape;
+    case 51: return Key_Backspace;
+    case 117: return Key_Delete;
+    case 123: return Key_Left;
+    case 124: return Key_Right;
+    case kKeyCodeF3: return Key_F3;
+    default: return Key_None;
+    }
+}
+
 - (void)enqueueKey:(NSEvent *)event pressed:(BOOL)pressed {
     if (_pendingKeyEventCount >= kMaxKeyEvents) {
         return;
@@ -142,7 +157,7 @@ constexpr unsigned short kKeyCodeF3 = 99;
         mods |= 16u; // ShortcutMod_F3: F3 held as a chord prefix
     }
     _pendingKeyEvents[_pendingKeyEventCount++] =
-        (KeyEvent){(int)event.keyCode, codepoint, mods, (bool)pressed};
+        (KeyEvent){NormalizedKeyCode(event.keyCode), codepoint, mods, (bool)pressed};
 }
 
 - (int)drainKeyEventsInto:(KeyEvent *)dest max:(int)max {

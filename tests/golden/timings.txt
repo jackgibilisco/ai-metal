@@ -1,0 +1,7 @@
+default geometry=1 ao=0 lighting=1 fxaa=1 total=1
+fxaa_off geometry=1 ao=0 lighting=1 fxaa=0 total=1
+orbit_zoom geometry=1 ao=0 lighting=1 fxaa=1 total=1
+gizmo geometry=1 ao=0 lighting=1 fxaa=1 total=1
+layout_bounds geometry=1 ao=0 lighting=1 fxaa=1 total=1
+menu_strip geometry=1 ao=0 lighting=1 fxaa=1 total=1
+resize geometry=1 ao=0 lighting=1 fxaa=1 total=1

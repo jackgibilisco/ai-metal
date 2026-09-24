@@ -57,8 +57,6 @@ struct AppState {
 // A drag shorter than this is a click on empty space, not a box select.
 constexpr float kBoxSelectMinPixels = 3.0f;
 
-constexpr int kKeyCodeF3 = 99;
-
 CommandContext AppStateContext(AppState *appState) {
     return CommandContext{&appState->menu, &appState->flags, appState->menuHooks,
                           appState->fullscreen};
@@ -247,7 +245,7 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     }
 
     for (int i = 0; i < input.keyEventCount; ++i) {
-        if (input.keyEvents[i].keyCode == kKeyCodeF3) {
+        if (input.keyEvents[i].keyCode == Key_F3) {
             if (input.keyEvents[i].pressed) {
                 appState->f3Down = true;
                 appState->f3Chorded = false;
@@ -288,7 +286,7 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
                 SceneSetToolMode(appState->scene, ToolMode_Rotate);
             } else if (key == '3') {
                 SceneSetToolMode(appState->scene, ToolMode_Scale);
-            } else if (key == 127 || keyCode == 51 || keyCode == 117) { // Backspace / Fwd-Delete
+            } else if (keyCode == Key_Backspace || keyCode == Key_Delete) {
                 SceneDeleteSelection(appState->scene);
             } else if (key == 'n') {
                 appState->addMenuRequested = true; // outliner opens its add-kind dropdown

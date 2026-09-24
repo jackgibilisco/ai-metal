@@ -4,6 +4,19 @@
 // renderer (camera) and the UI core can share it without pulling in any
 // platform or graphics headers.
 
+// Keys that produce no character. Each platform layer maps its own virtual key
+// codes into this set, so app.cpp and ui.cpp never see a native key code.
+enum {
+    Key_None = 0,
+    Key_Return,
+    Key_Escape,
+    Key_Backspace,
+    Key_Delete,
+    Key_Left,
+    Key_Right,
+    Key_F3,
+};
+
 struct KeyEvent {
     int keyCode;
     unsigned int codepoint; // 0 when the key produces no character

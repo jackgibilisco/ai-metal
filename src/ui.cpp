@@ -1555,20 +1555,20 @@ int TextInputWidget(UiState *ui, Rect r, char *out, int outCap) {
             continue;
         }
         unsigned int cp = key.codepoint;
-        if (key.keyCode == 36 || cp == 13) { // Return
+        if (key.keyCode == Key_Return) {
             result = UiEdit_Commit;
-        } else if (key.keyCode == 53 || cp == 27) { // Esc
+        } else if (key.keyCode == Key_Escape) {
             result = UiEdit_Cancel;
-        } else if (cp == 127 || key.keyCode == 51) { // Backspace
+        } else if (key.keyCode == Key_Backspace) {
             if (ui->editCaret > 0) {
                 memmove(ui->editBuffer + ui->editCaret - 1, ui->editBuffer + ui->editCaret,
                         (size_t)(ui->editLen - ui->editCaret + 1));
                 --ui->editCaret;
                 --ui->editLen;
             }
-        } else if (key.keyCode == 123) { // Left
+        } else if (key.keyCode == Key_Left) {
             if (ui->editCaret > 0) --ui->editCaret;
-        } else if (key.keyCode == 124) { // Right
+        } else if (key.keyCode == Key_Right) {
             if (ui->editCaret < ui->editLen) ++ui->editCaret;
         } else if (cp >= 32 && cp < 127 && ui->editLen < (int)sizeof(ui->editBuffer) - 1) {
             memmove(ui->editBuffer + ui->editCaret + 1, ui->editBuffer + ui->editCaret,

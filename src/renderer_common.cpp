@@ -86,8 +86,12 @@ float Clamp(float value, float minValue, float maxValue) {
     return value;
 }
 
-float RandomUnit() {
-    return (float)rand() / (float)RAND_MAX;
+// A linear congruential generator rather than rand(): the C library's sequence
+// differs between platforms, which would leave macOS and Windows sampling AO
+// through different kernels and break image parity.
+float RandomUnit(unsigned int *state) {
+    *state = *state * 1664525u + 1013904223u;
+    return (float)(*state >> 8) / (float)(1u << 24);
 }
 
 // Screen-space right/up axes of the orbit camera, derived algebraically from
@@ -203,12 +207,12 @@ Ray CameraScreenPointToRay(const RendererCamera *camera, float screenX, float sc
 
 void BuildAoSamples(float kernel[kAoKernelSize][4],
                     float noiseTexels[kAoNoiseSize * kAoNoiseSize * 4]) {
-    srand(1);
+    unsigned int random = 1;
     for (int i = 0; i < kAoKernelSize; ++i) {
         Vec3 sample = {
-            RandomUnit() * 2.0f - 1.0f,
-            RandomUnit() * 2.0f - 1.0f,
-            RandomUnit(),
+            RandomUnit(&random) * 2.0f - 1.0f,
+            RandomUnit(&random) * 2.0f - 1.0f,
+            RandomUnit(&random),
         };
         float length = sqrtf(sample.x * sample.x + sample.y * sample.y + sample.z * sample.z);
         sample = {sample.x / length, sample.y / length, sample.z / length};
@@ -223,10 +227,10 @@ void BuildAoSamples(float kernel[kAoKernelSize][4],
     }
 
     for (int i = 0; i < kAoNoiseSize * kAoNoiseSize; ++i) {
-        noiseTexels[i * 4 + 0] = RandomUnit() * 2.0f - 1.0f;
-        noiseTexels[i * 4 + 1] = RandomUnit() * 2.0f - 1.0f;
+        noiseTexels[i * 4 + 0] = RandomUnit(&random) * 2.0f - 1.0f;
+        noiseTexels[i * 4 + 1] = RandomUnit(&random) * 2.0f - 1.0f;
         noiseTexels[i * 4 + 2] = 0.0f;
-        noiseTexels[i * 4 + 3] = RandomUnit();
+        noiseTexels[i * 4 + 3] = RandomUnit(&random);
     }
 }
 

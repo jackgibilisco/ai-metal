@@ -1,9 +1,9 @@
 CXX := clang++
-ZSTD_PREFIX := $(shell brew --prefix zstd)
-CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -fobjc-arc -I$(ZSTD_PREFIX)/include
-LDFLAGS := -L$(ZSTD_PREFIX)/lib -lzstd
+CC := clang
+CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -fobjc-arc
+LDFLAGS :=
 
-HEADLESS_FRAMEWORKS := -framework Foundation -framework QuartzCore -framework CoreAudio -framework AudioToolbox -framework AudioUnit -framework CoreText -framework CoreGraphics
+HEADLESS_FRAMEWORKS := -framework Foundation -framework QuartzCore -framework CoreAudio -framework AudioToolbox -framework AudioUnit
 APP_FRAMEWORKS := $(HEADLESS_FRAMEWORKS) -framework Cocoa -framework UniformTypeIdentifiers
 METAL_FRAMEWORKS := -framework Metal
 GL_FRAMEWORKS := -framework OpenGL -framework CoreVideo
@@ -19,6 +19,7 @@ METAL_APP_SRC := $(SRC_CPP) $(METAL_BACKEND) src/platform_macos.mm src/platform_
 GL_APP_SRC := $(SRC_CPP) $(GL_BACKEND) src/platform_macos.mm src/platform_macos_gl.mm
 
 BUILD_DIR := build
+ZSTD_OBJ := $(BUILD_DIR)/zstddeclib.o
 TARGET := $(BUILD_DIR)/Renderer
 GL_TARGET := $(BUILD_DIR)/Renderer_gl
 
@@ -27,7 +28,7 @@ UI_INSPECT_SRC := tools/ui_inspect.cpp src/ui.cpp src/scene.cpp src/timeline.cpp
 PARITY_SRC := tests/render_parity.cpp $(SRC_CPP)
 PARITY_DIR := $(BUILD_DIR)/parity
 
-.PHONY: all run opengl run-opengl clean ui-inspect parity-test
+.PHONY: all run opengl run-opengl clean ui-inspect parity-test bless-goldens
 
 all: $(TARGET)
 
@@ -35,16 +36,20 @@ opengl: $(GL_TARGET)
 
 ui-inspect: $(UI_INSPECT_SRC)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) -std=c++17 -Wall -Wextra -I src $(UI_INSPECT_SRC) -framework CoreText -framework CoreGraphics -framework CoreFoundation -o $(BUILD_DIR)/ui_inspect
+	$(CXX) -std=c++17 -Wall -Wextra -I src $(UI_INSPECT_SRC) -o $(BUILD_DIR)/ui_inspect
 	$(BUILD_DIR)/ui_inspect
 
-$(TARGET): $(METAL_APP_SRC) $(HEADERS)
+$(ZSTD_OBJ): src/third_party/zstd/zstddeclib.c
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(APP_FRAMEWORKS) $(METAL_FRAMEWORKS) $(METAL_APP_SRC) $(LDFLAGS) -o $@
+	$(CC) -std=c11 -O2 -c $< -o $@
 
-$(GL_TARGET): $(GL_APP_SRC) $(HEADERS)
+$(TARGET): $(METAL_APP_SRC) $(HEADERS) $(ZSTD_OBJ)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(APP_FRAMEWORKS) $(GL_FRAMEWORKS) $(GL_APP_SRC) $(LDFLAGS) -o $@
+	$(CXX) $(CXXFLAGS) $(APP_FRAMEWORKS) $(METAL_FRAMEWORKS) $(METAL_APP_SRC) $(ZSTD_OBJ) $(LDFLAGS) -o $@
+
+$(GL_TARGET): $(GL_APP_SRC) $(HEADERS) $(ZSTD_OBJ)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(APP_FRAMEWORKS) $(GL_FRAMEWORKS) $(GL_APP_SRC) $(ZSTD_OBJ) $(LDFLAGS) -o $@
 
 run: all
 	$(TARGET)
@@ -52,13 +57,13 @@ run: all
 run-opengl: opengl
 	$(GL_TARGET)
 
-$(BUILD_DIR)/parity_metal: $(PARITY_SRC) tests/offscreen_metal.mm $(METAL_BACKEND) $(HEADERS) tests/offscreen.h
+$(BUILD_DIR)/parity_metal: $(PARITY_SRC) tests/offscreen_metal.mm $(METAL_BACKEND) $(HEADERS) tests/offscreen.h $(ZSTD_OBJ)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -I src $(HEADLESS_FRAMEWORKS) $(METAL_FRAMEWORKS) $(PARITY_SRC) tests/offscreen_metal.mm $(METAL_BACKEND) $(LDFLAGS) -o $@
+	$(CXX) $(CXXFLAGS) -I src $(HEADLESS_FRAMEWORKS) $(METAL_FRAMEWORKS) $(PARITY_SRC) tests/offscreen_metal.mm $(METAL_BACKEND) $(ZSTD_OBJ) $(LDFLAGS) -o $@
 
-$(BUILD_DIR)/parity_gl: $(PARITY_SRC) tests/offscreen_gl.cpp $(GL_BACKEND) $(HEADERS) tests/offscreen.h
+$(BUILD_DIR)/parity_gl: $(PARITY_SRC) tests/offscreen_gl.cpp $(GL_BACKEND) $(HEADERS) tests/offscreen.h $(ZSTD_OBJ)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -I src $(HEADLESS_FRAMEWORKS) -framework OpenGL $(PARITY_SRC) tests/offscreen_gl.cpp $(GL_BACKEND) $(LDFLAGS) -o $@
+	$(CXX) $(CXXFLAGS) -I src $(HEADLESS_FRAMEWORKS) -framework OpenGL $(PARITY_SRC) tests/offscreen_gl.cpp $(GL_BACKEND) $(ZSTD_OBJ) $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/image_diff: tests/image_diff.cpp
 	@mkdir -p $(BUILD_DIR)
@@ -72,6 +77,16 @@ parity-test: $(BUILD_DIR)/parity_metal $(BUILD_DIR)/parity_gl $(BUILD_DIR)/image
 	$(BUILD_DIR)/parity_metal $(PARITY_DIR)/metal
 	$(BUILD_DIR)/parity_gl $(PARITY_DIR)/gl
 	$(BUILD_DIR)/image_diff $(PARITY_DIR)/metal $(PARITY_DIR)/gl --no-gpu-timings
+
+# The Windows build cannot run Metal, so it diffs against these committed
+# reference images instead. They are rendered with the AO pass disabled: SSAO
+# does enough float work that two GPU vendors disagree on a few percent of the
+# pixels, while everything else matches. Re-bless after any intended pixel
+# change, and commit the result.
+bless-goldens: $(BUILD_DIR)/parity_metal
+	@rm -rf tests/golden
+	@mkdir -p tests/golden
+	$(BUILD_DIR)/parity_metal tests/golden --ao-off
 
 clean:
 	rm -rf $(BUILD_DIR)

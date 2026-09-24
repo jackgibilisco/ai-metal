@@ -68,8 +68,8 @@ Vec3 CameraEye(const RendererCamera *camera);
 float CameraGizmoScale(const RendererCamera *camera, Vec3 pivot);
 Ray CameraScreenPointToRay(const RendererCamera *camera, float screenX, float screenY);
 
-// Seeds rand() and fills both from one stream, so every backend and every run
-// gets identical samples.
+// Fills both from one fixed-seed stream, so every backend, every run, and
+// every platform gets identical samples.
 void BuildAoSamples(float kernel[kAoKernelSize][4],
                     float noiseTexels[kAoNoiseSize * kAoNoiseSize * 4]);
 

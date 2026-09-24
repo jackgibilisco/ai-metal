@@ -15,12 +15,21 @@
 namespace {
 
 // A pixel "differs" when any channel is off by more than kNoticeableDelta.
-// A case fails if any channel is off by more than kMaxDelta, or if more than
-// kMaxDifferingFraction of its pixels differ. Metal and GL agree to within
-// 1/255 on Apple silicon; the slack is for other GPUs' rounding.
+// A case fails if any channel is off by more than maxDelta, or if more than
+// maxDifferingFraction of its pixels differ. Metal and GL agree to within
+// 1/255 on Apple silicon; the slack is for rounding.
 constexpr int kNoticeableDelta = 1;
-constexpr int kMaxDelta = 4;
-constexpr double kMaxDifferingFraction = 0.001;
+int g_maxDelta = 4;
+double g_maxDifferingFraction = 0.001;
+
+// --cross-gpu: two vendors' rasterizers break ties differently, so a handful
+// of pixels along a triangle edge take the other side's color outright. Allow
+// any delta, but far fewer such pixels — a real regression moves whole
+// regions, not one pixel in five thousand.
+void UseCrossGpuThresholds() {
+    g_maxDelta = 255;
+    g_maxDifferingFraction = 0.0002;
+}
 
 constexpr int kMaxCases = 64;
 constexpr int kMaxLine = 256;
@@ -111,7 +120,7 @@ bool CompareCase(const char *caseName, const Image &reference, const Image &test
         }
     }
     double differingFraction = (double)differingPixels / (double)pixelCount;
-    bool pass = maxDelta <= kMaxDelta && differingFraction <= kMaxDifferingFraction;
+    bool pass = maxDelta <= g_maxDelta && differingFraction <= g_maxDifferingFraction;
     printf("%s %-14s maxDelta=%3d differing=%.4f%%\n", pass ? "ok  " : "FAIL", caseName, maxDelta,
            differingFraction * 100.0);
     if (!pass) {
@@ -126,13 +135,23 @@ bool CompareCase(const char *caseName, const Image &reference, const Image &test
 } // namespace
 
 int main(int argc, char **argv) {
-    bool testHasGpuTimer = !(argc == 4 && strcmp(argv[3], "--no-gpu-timings") == 0);
-    if (argc != 3 && testHasGpuTimer) {
-        printf("usage: %s <reference-dir> <test-dir> [--no-gpu-timings]\n", argv[0]);
+    if (argc < 3) {
+        printf("usage: %s <reference-dir> <test-dir> [--no-gpu-timings] [--cross-gpu]\n", argv[0]);
         return 1;
     }
     const char *referenceDir = argv[1];
     const char *testDir = argv[2];
+    bool testHasGpuTimer = true;
+    for (int i = 3; i < argc; ++i) {
+        if (strcmp(argv[i], "--no-gpu-timings") == 0) {
+            testHasGpuTimer = false;
+        } else if (strcmp(argv[i], "--cross-gpu") == 0) {
+            UseCrossGpuThresholds();
+        } else {
+            printf("unknown option %s\n", argv[i]);
+            return 1;
+        }
+    }
     if (!testHasGpuTimer) {
         printf("skip timings: %s has no GPU timer\n", testDir);
     }

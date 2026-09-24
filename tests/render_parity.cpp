@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "app.h"
 #include "offscreen.h"
@@ -18,7 +19,12 @@ constexpr size_t kArenaSize = 192 * 1024 * 1024;
 constexpr int kWidth = 1280;
 constexpr int kHeight = 800;
 constexpr float kFrameSeconds = 1.0f / 60.0f;
-constexpr int kMacKeyCode1 = 18;
+
+// Set by --ao-off. SSAO samples the depth hemisphere with enough float work
+// that two GPU vendors disagree on a few percent of the pixels, so the Windows
+// build compares a set of images rendered with the AO pass disabled. On one
+// machine (macOS, Metal vs GL) the full images still match.
+bool g_forceAoOff;
 
 typedef void (*CaseScript)(Arena *arena, int width, int height);
 
@@ -27,6 +33,7 @@ struct ParityCase {
     CaseScript script;
     int width;
     int height;
+    bool aoOnly; // the script only changes the AO view, so --ao-off skips it
 };
 
 // The pointer rests over the 3D viewport (top middle of the default dock
@@ -85,7 +92,7 @@ void ScriptGizmo(Arena *arena, int, int) {
     input.mouseLeftDown = false;
     Step(arena, input);
 
-    input.keyEvents[0] = KeyEvent{kMacKeyCode1, '1', 0, true};
+    input.keyEvents[0] = KeyEvent{Key_None, '1', 0, true};
     input.keyEventCount = 1;
     Step(arena, input);
     input.keyEvents[0].pressed = false;
@@ -94,8 +101,8 @@ void ScriptGizmo(Arena *arena, int, int) {
 
 const ParityCase kCases[] = {
     {"default", ScriptNothing, kWidth, kHeight},
-    {"ao_raw", ScriptAoRaw, kWidth, kHeight},
-    {"ao_off", ScriptAoOff, kWidth, kHeight},
+    {"ao_raw", ScriptAoRaw, kWidth, kHeight, true},
+    {"ao_off", ScriptAoOff, kWidth, kHeight, true},
     {"fxaa_off", ScriptFxaaOff, kWidth, kHeight},
     {"orbit_zoom", ScriptOrbitZoom, kWidth, kHeight},
     {"gizmo", ScriptGizmo, kWidth, kHeight},
@@ -138,6 +145,9 @@ void RunCase(GpuContext *gpu, const ParityCase &parityCase, const char *outputDi
     Step(&arena, ViewportInput(width, height));
     Step(&arena, ViewportInput(width, height));
     parityCase.script(&arena, width, height);
+    if (g_forceAoOff) {
+        AppCommandContext(&arena).flags->aoDebugView = 2;
+    }
     Step(&arena, ViewportInput(width, height));
     Step(&arena, ViewportInput(width, height));
 
@@ -166,11 +176,12 @@ void RunCase(GpuContext *gpu, const ParityCase &parityCase, const char *outputDi
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        printf("usage: %s <output-dir>\n", argv[0]);
+    if (argc < 2 || argc > 3) {
+        printf("usage: %s <output-dir> [--ao-off]\n", argv[0]);
         return 1;
     }
     const char *outputDir = argv[1];
+    g_forceAoOff = argc == 3 && strcmp(argv[2], "--ao-off") == 0;
     GpuContext *gpu = OffscreenInit(kWidth, kHeight);
 
     char timingsPath[1024];
@@ -180,10 +191,15 @@ int main(int argc, char **argv) {
         printf("cannot write %s\n", timingsPath);
         return 1;
     }
+    int caseCount = 0;
     for (const ParityCase &parityCase : kCases) {
+        if (g_forceAoOff && parityCase.aoOnly) {
+            continue;
+        }
         RunCase(gpu, parityCase, outputDir, timingsFile);
+        caseCount++;
     }
     fclose(timingsFile);
-    printf("rendered %d cases into %s\n", (int)(sizeof(kCases) / sizeof(kCases[0])), outputDir);
+    printf("rendered %d cases into %s\n", caseCount, outputDir);
     return 0;
 }
