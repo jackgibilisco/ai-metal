@@ -2,7 +2,7 @@
 
 // Pure C++ frame-timing ring buffer for the debug HUD. Header-only, no
 // platform or Metal dependencies, in the same spirit as math3d.h. Times are
-// stored in milliseconds; the HUD view in platform_macos.mm reads them.
+// stored in milliseconds; app.cpp feeds it and ui.cpp draws the HUD from it.
 
 #include <algorithm>
 

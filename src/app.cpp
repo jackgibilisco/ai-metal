@@ -9,7 +9,14 @@
 #include "ui.h"
 #include "ui_render.h"
 
+#include <cstdio>
+#include <cstring>
+
 namespace {
+
+// The HUD's text is re-sampled at this interval rather than every frame, so
+// the numbers are readable at high refresh rates. The graph updates per frame.
+constexpr float kStatsHudRefreshSeconds = 0.066f;
 
 // The very first thing placed in the arena, so FrameUpdate/FrameRender can
 // always recover it from arena->base with no globals and no bookkeeping.
@@ -50,8 +57,15 @@ struct AppState {
     bool cameraButtonWasDown;
     bool cameraDragActive;
     bool uiHoverLastFrame;
+    bool dragHoveringLastFrame;
     float lastMouseX;
     float lastMouseY;
+
+    // Frame-timing HUD: one sample per rendered frame, and the readout text
+    // last formatted from it.
+    FrameStats frameStats;
+    char statsHudLines[kUiStatsHudLineCount][80];
+    float statsHudAge; // seconds since statsHudLines was formatted
 };
 
 // A drag shorter than this is a click on empty space, not a box select.
@@ -206,6 +220,59 @@ void PublishEditorState(AppState *appState) {
     appState->addMenuRequested = false; // handed off; the outliner opened it this frame
 }
 
+void FormatStatsHudLines(AppState *appState, float displayRefreshHz) {
+    const FrameStats *stats = &appState->frameStats;
+    float fps = 1000.0f / std::max(FrameStatsMeanMs(stats, 20), 0.001f);
+    float averageMs = FrameStatsMeanMs(stats, FrameStats::kCapacity);
+    float lowMs = FrameStatsOnePercentLowMs(stats);
+    float lowFps = 1000.0f / std::max(lowMs, 0.001f);
+    RendererPassTimings gpu = RendererLastFrameTimings(appState->renderer);
+
+    char(*lines)[80] = appState->statsHudLines;
+    snprintf(lines[0], 80, "FPS %.0f  (%.0f Hz)", fps, displayRefreshHz);
+    snprintf(lines[1], 80, "avg %.2f ms", averageMs);
+    snprintf(lines[2], 80, "1%% low %.0f fps  %.2f ms", lowFps, lowMs);
+    snprintf(lines[3], 80, "GPU %.2f ms", gpu.totalMs);
+    snprintf(lines[4], 80, " geo %.2f  ao %.2f  lit %.2f  fxaa %.2f", gpu.geometryMs, gpu.aoMs,
+             gpu.lightingMs, gpu.fxaaMs);
+}
+
+void DrawStatsHud(AppState *appState, float deltaTime, float displayRefreshHz) {
+    appState->statsHudAge += deltaTime;
+    bool neverFormatted = appState->statsHudLines[0][0] == '\0';
+    if (neverFormatted || appState->statsHudAge >= kStatsHudRefreshSeconds) {
+        FormatStatsHudLines(appState, displayRefreshHz);
+        appState->statsHudAge = 0.0f;
+    }
+
+    UiStatsHud hud = {};
+    for (int i = 0; i < kUiStatsHudLineCount; ++i) {
+        hud.lines[i] = appState->statsHudLines[i];
+    }
+    hud.frameTimes = &appState->frameStats;
+    hud.targetFrameMs = displayRefreshHz > 0.0f ? 1000.0f / displayRefreshHz : 0.0f;
+    UiDrawStatsHud(appState->ui, &hud);
+}
+
+bool PathHasExtension(const char *path, const char *extension) {
+    const char *dot = strrchr(path, '.');
+    if (dot == nullptr) {
+        return false;
+    }
+    for (int i = 0;; ++i) {
+        char c = dot[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
+        }
+        if (c != extension[i]) {
+            return false;
+        }
+        if (c == '\0') {
+            return true;
+        }
+    }
+}
+
 } // namespace
 
 void Init(Arena *arena, GpuContext *gpu, float drawableWidth, float drawableHeight,
@@ -221,11 +288,19 @@ void Init(Arena *arena, GpuContext *gpu, float drawableWidth, float drawableHeig
     UiSetFontMetrics(appState->ui, UiRenderFontMetrics(appState->uiRender));
     appState->menuHooks = menuHooks;
     appState->flags.fxaaEnabled = true;
+    appState->forcedRenderFrames = 3;
 }
 
 bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     AppState *appState = (AppState *)arena->base;
     appState->fullscreen = input.fullscreen;
+    if (deltaTime == 0.0f) {
+        appState->forcedRenderFrames = 3; // the loop just started or resumed
+    }
+
+    if (input.openedFile != nullptr && SceneImportBlendFile(appState->scene, input.openedFile)) {
+        appState->forcedRenderFrames = 3;
+    }
 
     TimelineUpdate(appState->timeline, input, appState->scene, deltaTime);
     bool playing = TimelineIsPlaying(appState->timeline);
@@ -237,6 +312,8 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     PublishEditorState(appState);
     UiSetMarquee(appState->ui, appState->boxSelecting, appState->boxAnchorX, appState->boxAnchorY,
                  input.mouseX, input.mouseY);
+    // Read before UiBuildFrame, which may end a text edit on this very Escape.
+    bool textFieldHadKeyboard = UiWantsKeyboard(appState->ui);
     UiBuildFrame(appState->ui, input, AppStateContext(appState));
 
     CommandId clicked = UiTakeCommand(appState->ui);
@@ -263,9 +340,18 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
         if (!input.keyEvents[i].pressed) {
             continue;
         }
+        unsigned int mods = input.keyEvents[i].mods;
+        if (appState->f3Down) {
+            mods |= ShortcutMod_F3;
+        }
         unsigned int key = input.keyEvents[i].codepoint;
         if (key >= 'A' && key <= 'Z') {
             key += 32;
+        }
+        if (input.keyEvents[i].keyCode == Key_Escape && appState->fullscreen &&
+            !textFieldHadKeyboard) {
+            InvokeCommand(appState, Command_ToggleFullscreen);
+            continue;
         }
         if (key == ' ') {
             TimelineTogglePlay(appState->timeline);
@@ -290,14 +376,14 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
                 SceneDeleteSelection(appState->scene);
             } else if (key == 'n') {
                 appState->addMenuRequested = true; // outliner opens its add-kind dropdown
-            } else if ((key == '=' || key == '+') && (input.keyEvents[i].mods & ShortcutMod_Cmd)) {
+            } else if ((key == '=' || key == '+') && (mods & ShortcutMod_Cmd)) {
                 UiAdjustUiScale(appState->ui, 0.1f);
-            } else if (key == '-' && (input.keyEvents[i].mods & ShortcutMod_Cmd)) {
+            } else if (key == '-' && (mods & ShortcutMod_Cmd)) {
                 UiAdjustUiScale(appState->ui, -0.1f);
-            } else if (key == '0' && (input.keyEvents[i].mods & ShortcutMod_Cmd)) {
+            } else if (key == '0' && (mods & ShortcutMod_Cmd)) {
                 UiSetUiScale(appState->ui, 1.0f);
-            } else if (key == 'z' && (input.keyEvents[i].mods & ShortcutMod_Cmd)) {
-                if (input.keyEvents[i].mods & ShortcutMod_Shift) {
+            } else if (key == 'z' && (mods & ShortcutMod_Cmd)) {
+                if (mods & ShortcutMod_Shift) {
                     SceneRedo(appState->scene);
                 } else {
                     SceneUndo(appState->scene);
@@ -311,7 +397,7 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
             }
         }
 
-        const Command *command = CommandForShortcut(key, input.keyEvents[i].mods);
+        const Command *command = CommandForShortcut(key, mods);
         if (command != nullptr) {
             InvokeCommand(appState, command->id);
         }
@@ -337,7 +423,16 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     }
     appState->cameraButtonWasDown = cameraButtonDown;
 
+    // Right-drag pans; shift+right-drag and middle-drag orbit.
     FrameInput cameraInput = input;
+    bool orbitDrag = input.mouseMiddleDown || (input.mouseRightDown && input.shift);
+    if (orbitDrag) {
+        cameraInput.orbitYaw += input.mouseDeltaX;
+        cameraInput.orbitPitch += input.mouseDeltaY;
+    } else if (input.mouseRightDown) {
+        cameraInput.panX += input.mouseDeltaX;
+        cameraInput.panY += input.mouseDeltaY;
+    }
     if (UiWantsMouse(appState->ui) && !appState->cameraDragActive) {
         cameraInput.panX = 0.0f;
         cameraInput.panY = 0.0f;
@@ -366,11 +461,28 @@ bool FrameUpdate(Arena *arena, float deltaTime, FrameInput input) {
     bool uiInteracting = UiWantsMouse(appState->ui) || UiWantsKeyboard(appState->ui) ||
                          input.dragHovering;
 
+    // A drag that just left clears its drop ghost; a drop adds clips.
+    bool dragEnded = appState->dragHoveringLastFrame && !input.dragHovering;
+    appState->dragHoveringLastFrame = input.dragHovering;
+    if (dragEnded || input.droppedFileCount > 0) {
+        appState->forcedRenderFrames = 3;
+    }
+
+    // The frame-timing HUD renders continuously so it measures steady-state
+    // frame cost instead of freezing whenever the scene is idle.
     bool needsRender = sceneChanged || cameraMoved || uiInteracting || playing ||
-                       appState->forcedRenderFrames > 0;
+                       appState->forcedRenderFrames > 0 || appState->flags.frameStatsHud;
 
     if (appState->forcedRenderFrames > 0) {
         appState->forcedRenderFrames--;
+    }
+
+    // Only rendered frames are timed: an idle frame costs a vblank wait, not work.
+    if (needsRender && deltaTime > 0.0f) {
+        FrameStatsPush(&appState->frameStats, deltaTime);
+    }
+    if (appState->flags.frameStatsHud) {
+        DrawStatsHud(appState, deltaTime, input.displayRefreshHz);
     }
     return needsRender;
 }
@@ -402,33 +514,21 @@ void FrameResize(Arena *arena, float drawableWidth, float drawableHeight) {
     appState->forcedRenderFrames = 3;
 }
 
-void AppRequestRender(Arena *arena) {
-    AppState *appState = (AppState *)arena->base;
-    appState->forcedRenderFrames = 3;
-}
-
-RendererPassTimings FrameGpuTimings(Arena *arena) {
-    AppState *appState = (AppState *)arena->base;
-    return RendererLastFrameTimings(appState->renderer);
-}
-
-bool AppDebugHudVisible(Arena *arena) {
-    return ((AppState *)arena->base)->flags.frameStatsHud;
-}
-
 void AppInvokeCommand(Arena *arena, CommandId id) {
     InvokeCommand((AppState *)arena->base, id);
 }
 
-CommandContext AppCommandContext(Arena *arena) {
-    return AppStateContext((AppState *)arena->base);
+CommandState AppCommandState(Arena *arena, CommandId id) {
+    const Command *command = CommandById(id);
+    if (command == nullptr) {
+        return CommandState{true, false, false};
+    }
+    return CommandQueryState(command, AppStateContext((AppState *)arena->base));
 }
 
-bool ImportBlendFile(Arena *arena, const char *filepath) {
+bool AppAcceptsDroppedFile(const char *path) { return PathHasExtension(path, ".wav"); }
+
+RendererPassTimings FrameGpuTimings(Arena *arena) {
     AppState *appState = (AppState *)arena->base;
-    bool imported = SceneImportBlendFile(appState->scene, filepath);
-    if (imported) {
-        appState->forcedRenderFrames = 3;
-    }
-    return imported;
+    return RendererLastFrameTimings(appState->renderer);
 }

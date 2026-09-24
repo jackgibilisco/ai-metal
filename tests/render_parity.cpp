@@ -131,7 +131,6 @@ void RunCase(GpuContext *gpu, const ParityCase &parityCase, const char *outputDi
     Arena arena = ArenaCreate(memory, kArenaSize);
     PlatformMenuHooks noHooks = {};
     Init(&arena, gpu, (float)kWidth, (float)kHeight, noHooks);
-    AppRequestRender(&arena);
 
     int width = parityCase.width;
     int height = parityCase.height;
@@ -146,7 +145,10 @@ void RunCase(GpuContext *gpu, const ParityCase &parityCase, const char *outputDi
     Step(&arena, ViewportInput(width, height));
     parityCase.script(&arena, width, height);
     if (g_forceAoOff) {
-        AppCommandContext(&arena).flags->aoDebugView = 2;
+        // Every case left under --ao-off starts at the normal view (0);
+        // cycling twice reaches 2, AO disabled.
+        AppInvokeCommand(&arena, Command_CycleAoDebug);
+        AppInvokeCommand(&arena, Command_CycleAoDebug);
     }
     Step(&arena, ViewportInput(width, height));
     Step(&arena, ViewportInput(width, height));

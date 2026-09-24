@@ -456,7 +456,7 @@ Rect MenuDropdownRect(const UiState *ui, int menuIndex) {
 }
 
 bool MenuEntryEnabled(const UiState *ui, const Command *command) {
-    return command->isEnabled == nullptr || command->isEnabled(ui->menuContext);
+    return CommandQueryState(command, ui->menuContext).enabled;
 }
 
 void MenuUpdate(UiState *ui) {
@@ -1898,6 +1898,49 @@ void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext) {
         ui->activeId = 0;
     }
     ui->prevMouseDown = ui->mouseDown;
+}
+
+void UiDrawStatsHud(UiState *ui, const UiStatsHud *hud) {
+    constexpr float kMargin = 10.0f;
+    constexpr float kGraphWidth = (float)FrameStats::kCapacity;
+    constexpr float kGraphHeight = 64.0f;
+
+    float lineHeight = TextLineHeight();
+    float textWidth = 0.0f;
+    for (int i = 0; i < kUiStatsHudLineCount; ++i) {
+        textWidth = std::max(textWidth, TextWidth(hud->lines[i]));
+    }
+    float panelWidth = std::max(textWidth, kGraphWidth) + kMargin * 2.0f;
+    float panelHeight = kUiStatsHudLineCount * lineHeight + kGraphHeight + kMargin * 3.0f;
+    Rect panel = {ui->contentRect.x + ui->contentRect.w - panelWidth - kMargin,
+                  ui->contentRect.y + kMargin, panelWidth, panelHeight};
+    PushRect(ui, panel, theme::HudPanel);
+    for (int i = 0; i < kUiStatsHudLineCount; ++i) {
+        PushText(ui, panel.x + kMargin, panel.y + kMargin + (float)i * lineHeight, hud->lines[i],
+                 theme::HudText);
+    }
+
+    Rect graph = {panel.x + kMargin, panel.y + kMargin * 2.0f + kUiStatsHudLineCount * lineHeight,
+                  kGraphWidth, kGraphHeight};
+    float graphBottom = graph.y + graph.h;
+    float targetMs = hud->targetFrameMs > 0.0f ? hud->targetFrameMs : 1000.0f / 60.0f;
+    float maxMs = targetMs * 3.0f;
+    PushRect(ui, graph, theme::HudGraph);
+    for (int multiple = 1; multiple <= 2; ++multiple) {
+        float y = graphBottom - graph.h * ((float)multiple * targetMs / maxMs);
+        PushRect(ui, {graph.x, y, graph.w, 1.0f}, theme::HudGuide);
+    }
+
+    const FrameStats *stats = hud->frameTimes;
+    for (int i = 0; i < stats->count; ++i) {
+        float ms = FrameStatsSample(stats, i);
+        float barHeight = graph.h * std::min(ms / maxMs, 1.0f);
+        float x = graph.x + graph.w - (float)stats->count + (float)i;
+        Color color = ms <= targetMs          ? theme::HudFrameOk
+                      : ms <= 2.0f * targetMs ? theme::HudFrameSlow
+                                              : theme::HudFrameMiss;
+        PushRect(ui, {x, graphBottom - barHeight, 1.0f, barHeight}, color);
+    }
 }
 
 void UiBeginPanel(UiState *ui, UiPanelId id, const char *title, int initialDock, float initialSize) {

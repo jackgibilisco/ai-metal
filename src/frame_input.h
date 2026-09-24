@@ -27,12 +27,19 @@ struct KeyEvent {
 constexpr int kMaxKeyEvents = 16;
 
 struct FrameInput {
-    // Accumulated camera pointer deltas since the last frame.
+    // Accumulated camera deltas since the last frame from gestures the platform
+    // interprets itself (trackpad scroll, wheel, pinch). Mouse-button drags
+    // arrive as mouseDeltaX/Y instead; the app maps those onto the camera.
     float panX;
     float panY;
     float zoomDelta;
     float orbitYaw;
     float orbitPitch;
+
+    // Pointer motion since the last frame, in points (backing pixels divided by
+    // the display scale), so drag speed feels the same on every display.
+    float mouseDeltaX;
+    float mouseDeltaY;
 
     // Trackpad pinch this frame, in the raw NSEvent magnification unit. Kept
     // separate from zoomDelta so the UI can claim it (timeline zoom) while the
@@ -60,6 +67,14 @@ struct FrameInput {
     int keyEventCount;
 
     bool fullscreen; // borderless fullscreen: the in-app menu strip is forced on
+
+    // Refresh rate of the display the window is on; the frame-timing HUD's
+    // graph is scaled against one refresh interval. 0 when unknown.
+    float displayRefreshHz;
+
+    // A file the user picked in the open dialog (PlatformMenuHooks
+    // showOpenDialog), or null. Owned by the platform, valid this frame only.
+    const char *openedFile;
 
     // Files dropped onto the window this frame. The array and the strings it
     // points at are owned by the platform layer and valid for this frame only.

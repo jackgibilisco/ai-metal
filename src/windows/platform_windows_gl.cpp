@@ -159,17 +159,3 @@ void PresenterWaitVBlank(Presenter *presenter) {
     (void)presenter;
     DwmFlush();
 }
-
-int PresenterDisplayRefreshHz(HWND window) {
-    MONITORINFOEXW monitor = {};
-    monitor.cbSize = sizeof(monitor);
-    GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor);
-
-    DEVMODEW mode = {};
-    mode.dmSize = sizeof(mode);
-    if (!EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &mode) ||
-        mode.dmDisplayFrequency <= 1) {
-        return 60;
-    }
-    return (int)mode.dmDisplayFrequency;
-}

@@ -12,6 +12,7 @@
 
 #include "arena.h"
 #include "frame_input.h"
+#include "frame_stats.h"
 #include "menu.h"
 
 struct UiVertex {
@@ -74,6 +75,19 @@ void UiBuildFrame(UiState *ui, FrameInput input, CommandContext menuContext);
 // from its box-select drag state (two opposite corners; order-independent).
 // `active` false hides it.
 void UiSetMarquee(UiState *ui, bool active, float x0, float y0, float x1, float y1);
+
+// The frame-timing HUD (Debug > Frame Timing HUD): readout lines over a bar
+// graph of recent frame times, pinned to the viewport's top-right corner. The
+// app owns the numbers and formats the lines; call after UiBuildFrame.
+constexpr int kUiStatsHudLineCount = 5;
+
+struct UiStatsHud {
+    const char *lines[kUiStatsHudLineCount];
+    const FrameStats *frameTimes;
+    float targetFrameMs; // one display refresh; bars past 1x / 2x turn yellow / red
+};
+
+void UiDrawStatsHud(UiState *ui, const UiStatsHud *hud);
 
 // A command chosen in the in-app menu strip this frame, or Command_None.
 // Reading it clears it.

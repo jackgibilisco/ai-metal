@@ -28,7 +28,7 @@ set LIBS=opengl32.lib gdi32.lib user32.lib shell32.lib ole32.lib oleaut32.lib uu
 
 set CORE=src\arena.cpp src\undo_stack.cpp src\scene.cpp src\audio.cpp src\timeline.cpp src\gizmo.cpp src\game.cpp src\scene_import.cpp src\blend_file.cpp src\menu.cpp src\ui.cpp src\app.cpp src\renderer_common.cpp src\font_atlas.cpp
 set GL_BACKEND=src\renderer_gl.cpp src\ui_render_gl.cpp src\gl_shader.cpp src\windows\gl_loader.cpp
-set PLATFORM=src\windows\platform_windows.cpp src\windows\platform_windows_gl.cpp src\windows\platform_windows_hud.cpp
+set PLATFORM=src\windows\platform_windows.cpp src\windows\platform_windows_gl.cpp
 
 rem zstd's amalgamated decompressor is C99, so it gets its own object.
 set ZSTD_OBJ=%OBJ%\zstddeclib.obj

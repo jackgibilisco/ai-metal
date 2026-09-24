@@ -7,7 +7,7 @@ void RunQuit(CommandContext ctx) {
 }
 
 void RunImportFile(CommandContext ctx) {
-    ctx.hooks.importFile(ctx.hooks.context);
+    ctx.hooks.showOpenDialog(ctx.hooks.context, "blend");
 }
 
 void RunToggleFullscreen(CommandContext ctx) {
@@ -90,10 +90,16 @@ const Command *CommandForShortcut(unsigned int key, unsigned int mods) {
     if (key == 0) {
         return nullptr;
     }
+    // Ctrl is display-only metadata, never a matching criterion of its own: on
+    // Windows it rides along with Cmd (there is no separate Cmd key there),
+    // so a table entry storing plain ShortcutMod_Cmd must still match a Ctrl
+    // key event that carries both bits.
+    unsigned int matchMods = mods & ~(unsigned int)ShortcutMod_Ctrl;
     int count;
     const Command *table = CommandTable(&count);
     for (int i = 0; i < count; ++i) {
-        if (table[i].shortcut.key == key && table[i].shortcut.mods == mods) {
+        unsigned int shortcutMods = table[i].shortcut.mods & ~(unsigned int)ShortcutMod_Ctrl;
+        if (table[i].shortcut.key == key && shortcutMods == matchMods) {
             return &table[i];
         }
     }
@@ -105,10 +111,18 @@ void CommandInvoke(CommandId id, CommandContext ctx) {
     if (command == nullptr || command->invoke == nullptr) {
         return;
     }
-    if (command->isEnabled != nullptr && !command->isEnabled(ctx)) {
+    if (!CommandQueryState(command, ctx).enabled) {
         return;
     }
     command->invoke(ctx);
+}
+
+CommandState CommandQueryState(const Command *command, CommandContext ctx) {
+    CommandState state = {};
+    state.enabled = command->isEnabled == nullptr || command->isEnabled(ctx);
+    state.checkable = command->isChecked != nullptr;
+    state.checked = state.checkable && command->isChecked(ctx);
+    return state;
 }
 
 MenuBar MenuBarDefault() {

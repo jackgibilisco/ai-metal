@@ -91,4 +91,13 @@ constexpr Color ToolButton = {52, 57, 66, 255};
 constexpr Color ToolButtonHot = {70, 77, 90, 255};
 constexpr Color ToolButtonActive = {92, 142, 222, 255}; // current tool mode
 
+// ---- frame-timing HUD (src/ui.cpp) -----------------------------------
+constexpr Color HudPanel = {0, 0, 0, 140};
+constexpr Color HudText = {255, 255, 255, 255};
+constexpr Color HudGraph = {255, 255, 255, 31};
+constexpr Color HudGuide = {255, 255, 255, 64};   // 1x and 2x one display refresh
+constexpr Color HudFrameOk = {52, 199, 89, 255};   // within one refresh
+constexpr Color HudFrameSlow = {255, 204, 0, 255}; // within two
+constexpr Color HudFrameMiss = {255, 59, 48, 255};
+
 } // namespace theme

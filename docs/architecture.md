@@ -23,9 +23,19 @@ Init(arena, GpuContext*, drawableW, drawableH, menuHooks)                      /
 FrameUpdate(arena, deltaTime, FrameInput) -> bool needsRender                  // every tick
 FrameRender(arena, RenderTarget*)                                             // only when needsRender
 FrameResize(arena, drawableW, drawableH)                                      // on drawable resize
-AppRequestRender(arena)                                                       // force the next few renders
-AppInvokeCommand(arena, CommandId) / AppCommandContext(arena)                  // native menu bar
+AppInvokeCommand(arena, CommandId) / AppCommandState(arena, CommandId)         // native menu bar
+AppAcceptsDroppedFile(path)                                                   // drag cursor feedback
 ```
+
+A platform layer reports raw input and window events; `app.cpp` decides what
+they mean. Keybindings (including the F3 chord prefix and Escape leaving
+fullscreen), mapping right / shift+right / middle drags (`FrameInput.mouseDeltaX/Y`)
+onto the camera, which dropped files are accepted, importing the file picked
+in the open dialog (`PlatformMenuHooks.showOpenDialog` -> `FrameInput.openedFile`),
+and the frame-timing HUD (drawn by `ui.cpp` from a `FrameStats` the app feeds)
+all live on the portable side. A `deltaTime` of 0 marks the first frame after
+the loop starts or resumes, and `Init` / `FrameResize` / commands force their
+own repaints, so no platform ever asks for a render.
 
 `GpuContext` and `RenderTarget` are forward-declared in `src/gpu.h` and
 opaque to `app.cpp`; each graphics backend defines them: `src/gpu_metal.h`
@@ -37,7 +47,7 @@ after `FrameRender` returns.
 
 `FrameUpdate` returns whether anything the renderer would draw differently
 changed this frame (scene animated, camera moved, a render toggle fired, the
-UI is being interacted with, or `AppRequestRender` was called); when it
+UI is being interacted with, or a forced repaint is pending); when it
 returns false the platform layer skips `FrameRender` and leaves the last
 presented drawable on screen. The display link is paused outright
 when the window can't be seen (see the platform layer).
@@ -196,22 +206,19 @@ The portable input/menu structs live in their own dependency-free headers
   window minimized, or not `NSWindowOcclusionStateVisible`) and resumes on
   the matching `windowDidChangeOcclusionState:` /
   `applicationDid{Become,Resign}Active:` / `windowDid{Miniaturize,Deminiaturize}:`
-  notifications, re-priming `AppViewDelegate.lastTime` and calling
-  `AppRequestRender`. `InstallMainMenu` builds the `NSMenu` bar from the
+  notifications, re-priming `AppViewDelegate.lastTime` (the next
+  `deltaTime` of 0 makes the app repaint). `InstallMainMenu` builds the `NSMenu` bar from the
   `MenuBarDefault()` layout + command table; every item carries its
   `CommandId` in its `tag`, has no `keyEquivalent` (the app's own keybinding
   matcher in `FrameUpdate` is the sole shortcut handler, so shortcuts also
   work with no `NSMenu`), and routes through one `-dispatchMenuAction:` ->
-  `AppInvokeCommand`; `-validateMenuItem:` reads the command's `isChecked` /
-  `isEnabled` via `AppCommandContext`. `keyDown:`/`keyUp:` record each
+  `AppInvokeCommand`; `-validateMenuItem:` reads the command's checked /
+  enabled state via `AppCommandState`. `keyDown:`/`keyUp:` record each
   `KeyEvent` with its modifier bits captured at event time (a synthetic
   Cmd-up can beat the frame, so sampling the modifier level-state at frame
   assembly is unreliable). The platform-only actions are `PlatformMenuHooks`
-  C trampolines handed to `Init`. It also owns `DebugHudView`,
-  a pass-through `NSView` overlay that renders the `F3` frame-timing HUD
-  from a `FrameStats` (`src/frame_stats.h`, header-only pure C++) fed one
-  `deltaTime` sample per frame. A future second platform (e.g. iOS or
-  Windows) would add a new file at this layer plus a `ui_render_*` backend,
+  C trampolines handed to `Init`. A future platform (e.g. iOS) would add a
+  new file at this layer plus a `ui_render_*` backend,
   and fill in `PlatformMenuHooks`; `game.*`, `ui.*`, `menu.*`, and
   the renderers are unchanged. Fullscreen is *not*
   AppKit's Spaces fullscreen (it throttles the display link back to
@@ -222,7 +229,7 @@ The portable input/menu structs live in their own dependency-free headers
   "Toggle Full Screen" (Cmd-F) and any `-toggleFullScreen:` (routed through
   `AppContentView`'s override), the green zoom button (`windowShouldZoom:`
   returns NO after toggling), and Escape (only while already fullscreen,
-  since there is no title bar to click). `AppWindow` overrides
+  since there is no title bar to click; `app.cpp` binds it). `AppWindow` overrides
   `canBecomeKeyWindow`/`canBecomeMainWindow` so the borderless window still
   takes keyboard input. `AppViewDelegate.resizeToBackingSize:` resizes the
   presenter's drawable (from the view's `onResize` and after the fullscreen

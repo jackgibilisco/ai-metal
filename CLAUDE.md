@@ -98,6 +98,13 @@ native virtual key code. Each platform layer translates its own codes
 (`NormalizedKeyCode` in `platform_macos.mm` and `platform_windows.cpp`);
 `app.cpp` and `ui.cpp` only ever see the enum.
 
+Platform layers report raw input and window events only; every decision
+about what they mean (shortcuts incl. the F3 chord and Escape-leaves-fullscreen,
+right/middle-drag camera mapping, accepted drop files, the frame-timing HUD,
+repaint requests) lives in `app.cpp` / `ui.cpp`. Keep it that way: new
+behavior goes on the portable side, and the platform only gains a raw field
+in `FrameInput` or a hook in `PlatformMenuHooks`.
+
 Layers by portability contract:
 
 | file | contract | owns |
@@ -112,11 +119,10 @@ Layers by portability contract:
 | `src/ui_render_metal.mm` | Metal only | UI pipeline, glyph atlas, per-frame vertex buffer |
 | `src/renderer_gl.cpp`, `src/ui_render_gl.cpp`, `src/gpu_gl.h`, `src/gl_shader.*` | OpenGL 4.1 core, no AppKit/Win32 | GL backend, same passes as Metal; no GPU timings (Apple GL timer queries read 0) |
 | `src/windows/gl_loader.h`/`.cpp`, `src/third_party/glcorearb.h` | Windows only | one X-macro list of the 58 GL entry points, resolved through `wglGetProcAddress` with a fallback to `opengl32.dll` |
-| `src/macos/platform_macos.mm` | AppKit, no graphics API | `NSWindow`, content view, arena alloc, NSEvent -> `FrameInput`, native menu, HUD, fullscreen |
+| `src/macos/platform_macos.mm` | AppKit, no graphics API | `NSWindow`, content view, arena alloc, NSEvent -> `FrameInput`, native menu, open panel, fullscreen |
 | `src/macos/platform_macos_present.h`, `src/macos/platform_macos_{metal,gl}.mm` | AppKit + one graphics API | presenter: backing layer / GL context, display link, per-frame begin + present |
 | `src/windows/platform_windows.cpp` | Win32, no graphics API | window, arena alloc, messages -> `FrameInput`, `HMENU` from the command table, `IDropTarget`, `IFileOpenDialog`, borderless fullscreen, frame loop |
 | `src/windows/platform_windows_present.h`, `src/windows/platform_windows_gl.cpp` | Win32 + WGL | presenter: WGL 4.1 core context, swap interval 1, `DwmFlush` for idle frames |
-| `src/windows/platform_windows_hud.h`/`.cpp` | Win32 GDI | the `DebugHudView` counterpart: a click-through layered overlay window |
 | `src/math3d.h` | header-only pure C++ | column-major `Vec3`/`Mat4`, layout matches MSL `float4x4` |
 | `src/undo_stack.h`/`.cpp` | pure C++, owned by no module | fixed-capacity undo/redo ring; stores each command's payload by value; scene and timeline both submit to one shared instance |
 | `src/frame_input.h`, `frame_stats.h` | dependency-free headers | portable input/timing structs |
@@ -142,10 +148,13 @@ is in `docs/architecture.md`. SSAO/FXAA math is in `PLAN.md`.
 - **No `rand()` in the renderer**: `BuildAoSamples` runs its own LCG. The C
   library's sequence differs between platforms, which silently put macOS and
   Windows on different AO kernels and broke image parity by several percent.
-- **COM after audio (Windows)**: `platform_windows.cpp` calls `OleInitialize`
-  only after `Init` returns. Joining an apartment before `AudioInit` makes
-  miniaudio's WASAPI backend fault during device creation. Drag-and-drop and
-  the file dialog are the only things that need COM, and both come later.
+- **COM after audio (Windows)**: joining an STA before `AudioInit` makes
+  miniaudio's WASAPI backend fault during device creation, and `AudioInit`
+  leaves the main thread in the MTA, where `OleInitialize` fails
+  (`RPC_E_CHANGED_MODE`) and `RegisterDragDrop` silently rejects drops. So
+  after `Init`, `JoinSingleThreadedApartment` leaves the MTA and joins an STA.
+  Don't add `WS_EX_ACCEPTFILES`: it made a failed registration look like a
+  working drop target.
 - **Windows fullscreen covers the monitor exactly** — deliberately *not* the
   macOS 1px overhang below. That overhang dodges a WindowServer
   direct-scanout path; DWM has no equivalent penalty, so copying it would just

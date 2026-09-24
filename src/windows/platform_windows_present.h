@@ -1,7 +1,7 @@
 #pragma once
 
 // The graphics-API half of the Windows platform layer. platform_windows.cpp
-// owns the window, input, menus, and HUD and never names GL; the presenter
+// owns the window, input, and menus and never names GL; the presenter
 // owns the rendering context, the frame target, and presentation. Same split
 // as platform_macos_present.h, minus the display link: on Windows a swap
 // interval of 1 paces the frames that render, and PresenterWaitVBlank paces
@@ -27,6 +27,3 @@ void PresenterEndFrame(Presenter *presenter);
 // Blocks until the next vertical blank without presenting, so an idle frame
 // costs the same wall time as a rendered one.
 void PresenterWaitVBlank(Presenter *presenter);
-
-// Refresh rate of the monitor the window is on, for the HUD's target line.
-int PresenterDisplayRefreshHz(HWND window);

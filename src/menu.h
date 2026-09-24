@@ -23,9 +23,9 @@ enum {
     Command_ResetPanels,
 };
 
-// F3 is a held prefix, not a real modifier key: the platform layer ORs this bit
-// into every key event while F3 is down, so "F3+o" matches like any other
-// shortcut. F3 tapped alone (no chord) is its own shortcut, key 0.
+// F3 is a held prefix, not a real modifier key: the app ORs this bit into every
+// key event while F3 is down, so "F3+o" matches like any other shortcut. F3
+// tapped alone (no chord) is its own shortcut, key 0.
 enum {
     ShortcutMod_Cmd = 1 << 0,
     ShortcutMod_Shift = 1 << 1,
@@ -48,9 +48,11 @@ struct MenuState {
 };
 
 // Filled in by the platform layer so portable code can trigger the
-// platform-only commands without knowing about AppKit.
+// platform-only commands without knowing about AppKit or Win32.
 struct PlatformMenuHooks {
-    void (*importFile)(void *context);
+    // Shows a native open-file dialog filtered to `extension` (no dot). The
+    // pick, if any, arrives later as FrameInput.openedFile.
+    void (*showOpenDialog)(void *context, const char *extension);
     void (*toggleFullscreen)(void *context);
     void (*quit)(void *context);
     void *context;
@@ -78,6 +80,16 @@ const Command *CommandTable(int *count);
 const Command *CommandById(CommandId id);
 const Command *CommandForShortcut(unsigned int key, unsigned int mods);
 void CommandInvoke(CommandId id, CommandContext ctx);
+
+// What a native menu item needs to draw itself: greyed out, and whether it
+// shows a check mark.
+struct CommandState {
+    bool enabled;
+    bool checkable;
+    bool checked;
+};
+
+CommandState CommandQueryState(const Command *command, CommandContext ctx);
 
 // Menu layout: which commands appear under which title, in order. Entries are
 // command ids; kMenuSeparator draws a divider.
